@@ -34,7 +34,7 @@ export default function PostSession() {
             {/* Ring */}
             <div style={{ position: 'relative', flexShrink: 0 }}>
               <svg width="130" height="130">
-                <circle cx="65" cy="65" r="54" fill="none" stroke="#ece6d8" strokeWidth="12" />
+                <circle cx="65" cy="65" r="54" fill="none" stroke="#ddd0be" strokeWidth="12" />
                 <circle
                   cx="65" cy="65" r="54" fill="none" stroke="#4a7fe5" strokeWidth="12"
                   strokeDasharray={`${2 * Math.PI * 54 * (overall / 100)} ${2 * Math.PI * 54}`}

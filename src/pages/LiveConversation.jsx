@@ -50,7 +50,7 @@ export default function LiveConversation() {
       </div>
 
       {/* Tab bar */}
-      <div style={{ display: 'flex', gap: 4, background: '#ece6d8', borderRadius: 12, padding: 4, width: 'fit-content', marginBottom: 24 }}>
+      <div style={{ display: 'flex', gap: 4, background: '#ddd0be', borderRadius: 12, padding: 4, width: 'fit-content', marginBottom: 24 }}>
         {['conversation', 'live analysis'].map(t => (
           <button
             key={t}

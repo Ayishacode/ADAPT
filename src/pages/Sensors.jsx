@@ -63,7 +63,7 @@ export default function Sensors() {
             {['Low', 'Normal', 'High'].map(a => (
               <div key={a} style={{
                 flex: 1, height: 8, borderRadius: 4,
-                background: a === activity ? activityColors[a] : '#ece6d8',
+                background: a === activity ? activityColors[a] : '#ddd0be',
               }} />
             ))}
           </div>

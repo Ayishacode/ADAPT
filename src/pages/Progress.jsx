@@ -43,7 +43,7 @@ export default function Progress() {
       </div>
 
       {/* Big category tabs */}
-      <div style={{ display: 'flex', gap: 4, background: '#ece6d8', borderRadius: 12, padding: 4, width: 'fit-content', marginBottom: 24 }}>
+      <div style={{ display: 'flex', gap: 4, background: '#ddd0be', borderRadius: 12, padding: 4, width: 'fit-content', marginBottom: 24 }}>
         {bigTabs.map(t => (
           <button
             key={t}
@@ -68,7 +68,7 @@ export default function Progress() {
             <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>Communication Score</h3>
             <ResponsiveContainer width="100%" height={200}>
               <LineChart data={commScoreData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0ece4" />
+                <CartesianGrid strokeDasharray="3 3" stroke="#ddd0be" />
                 <XAxis dataKey="week" tick={{ fontSize: 12, fill: '#aaa' }} axisLine={false} tickLine={false} />
                 <YAxis domain={[50, 100]} tick={{ fontSize: 12, fill: '#aaa' }} axisLine={false} tickLine={false} />
                 <Tooltip contentStyle={{ borderRadius: 10, border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }} />
@@ -87,7 +87,7 @@ export default function Progress() {
             </div>
             <ResponsiveContainer width="100%" height={180}>
               <BarChart data={metricData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0ece4" />
+                <CartesianGrid strokeDasharray="3 3" stroke="#ddd0be" />
                 <XAxis dataKey="week" tick={{ fontSize: 12, fill: '#aaa' }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fontSize: 12, fill: '#aaa' }} axisLine={false} tickLine={false} />
                 <Tooltip contentStyle={{ borderRadius: 10, border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }} />
@@ -147,7 +147,7 @@ export default function Progress() {
                 </div>
                 <div style={{
                   width: 36, height: 36, borderRadius: '50%',
-                  background: `conic-gradient(#4a7fe5 ${s.score}%, #ece6d8 ${s.score}%)`,
+                  background: `conic-gradient(#4a7fe5 ${s.score}%, #ddd0be ${s.score}%)`,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}>
                   <div style={{ width: 26, height: 26, background: '#fff', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 800 }}>{s.score}</div>

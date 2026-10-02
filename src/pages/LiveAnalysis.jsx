@@ -40,7 +40,7 @@ export default function LiveAnalysis() {
       </div>
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, background: '#ece6d8', borderRadius: 12, padding: 4, width: 'fit-content', marginBottom: 24 }}>
+      <div style={{ display: 'flex', gap: 4, background: '#ddd0be', borderRadius: 12, padding: 4, width: 'fit-content', marginBottom: 24 }}>
         {tabs.map((t, i) => (
           <button
             key={t}
@@ -109,7 +109,7 @@ export default function LiveAnalysis() {
             <div style={{ fontSize: 12, color: '#888', marginBottom: 10, fontWeight: 600 }}>LIVE SCORE</div>
             <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
               <svg width="100" height="100">
-                <circle cx="50" cy="50" r="42" fill="none" stroke="#ece6d8" strokeWidth="10" />
+                <circle cx="50" cy="50" r="42" fill="none" stroke="#ddd0be" strokeWidth="10" />
                 <circle
                   cx="50" cy="50" r="42" fill="none" stroke="#4a7fe5" strokeWidth="10"
                   strokeDasharray={`${2 * Math.PI * 42 * 0.74} ${2 * Math.PI * 42}`}

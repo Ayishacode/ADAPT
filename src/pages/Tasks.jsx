@@ -102,7 +102,7 @@ export default function Tasks() {
       )}
 
       {/* Filter tabs */}
-      <div style={{ display: 'flex', gap: 4, background: '#ece6d8', borderRadius: 12, padding: 4, width: 'fit-content', marginBottom: 20 }}>
+      <div style={{ display: 'flex', gap: 4, background: '#ddd0be', borderRadius: 12, padding: 4, width: 'fit-content', marginBottom: 20 }}>
         {filterTabs.map(t => (
           <button
             key={t}
@@ -134,7 +134,7 @@ export default function Tasks() {
                 style={{
                   display: 'flex', alignItems: 'center', gap: 12, padding: '13px 18px',
                   borderBottom: idx < tasks[section.key].length - 1 ? '1px solid var(--border)' : 'none',
-                  background: task.done ? '#f9f7f4' : '#fff',
+                  background: task.done ? '#f5ede0' : '#fff',
                 }}
               >
                 <div

@@ -97,7 +97,7 @@ export default function NewConversation() {
                 <div
                   key={f.id}
                   className="card"
-                  style={{ background: enabled[f.id] ? 'var(--blue-light)' : '#f8f4ee', border: `1.5px solid ${enabled[f.id] ? '#c0d4f8' : 'transparent'}`, padding: 14 }}
+                  style={{ background: enabled[f.id] ? 'var(--blue-light)' : '#f5ede0', border: `1.5px solid ${enabled[f.id] ? '#c0d4f8' : 'transparent'}`, padding: 14 }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
                     <span style={{ fontSize: 28 }}>{f.icon}</span>

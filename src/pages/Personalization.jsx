@@ -78,7 +78,7 @@ export default function Personalization() {
                 <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 11, fill: '#aaa' }} axisLine={false} tickLine={false} />
                 <YAxis type="category" dataKey="metric" tick={{ fontSize: 12, fill: '#555' }} axisLine={false} tickLine={false} width={70} />
                 <Tooltip contentStyle={{ borderRadius: 10, border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }} />
-                <Bar dataKey="score" fill="#4a7fe5" radius={[0, 6, 6, 0]} background={{ fill: '#f0ece4', radius: [0, 6, 6, 0] }} />
+                <Bar dataKey="score" fill="#4a7fe5" radius={[0, 6, 6, 0]} background={{ fill: '#ddd0be', radius: [0, 6, 6, 0] }} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -94,7 +94,7 @@ export default function Personalization() {
                 <span className={`badge ${difficultyColor(t.difficulty)}`}>{t.difficulty}</span>
                 <div style={{
                   width: 38, height: 38, borderRadius: '50%',
-                  background: `conic-gradient(#4a7fe5 ${t.score}%, #ece6d8 ${t.score}%)`,
+                  background: `conic-gradient(#4a7fe5 ${t.score}%, #ddd0be ${t.score}%)`,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}>
                   <div style={{ width: 28, height: 28, background: '#fff', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 800 }}>{t.score}</div>

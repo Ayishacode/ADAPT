@@ -4,26 +4,26 @@
 
 body {
   font-family: 'Inter', sans-serif;
-  background: #f5f0e8;
+  background: #ede0cc;
   color: #2d2d2d;
   min-height: 100vh;
 }
 
 :root {
-  --bg: #f5f0e8;
-  --card: #ffffff;
-  --blue: #4a7fe5;
-  --blue-dark: #3a6fd4;
-  --blue-light: #e8f0fd;
+  --bg: #ede0cc;
+  --card: #fdf8f2;
+  --blue: #4a8eff;
+  --blue-dark: #3a7aee;
+  --blue-light: #eaf1ff;
   --green: #5cb85c;
   --orange: #f0a040;
   --red: #e05555;
   --text: #2d2d2d;
-  --text-muted: #888;
-  --border: #e8e0d0;
+  --text-muted: #9a8c7e;
+  --border: #e2d5c0;
   --sidebar-w: 180px;
   --radius: 18px;
-  --shadow: 0 4px 24px rgba(0,0,0,0.08);
+  --shadow: 0 4px 24px rgba(0,0,0,0.07);
 }
 
 .app-layout {
@@ -34,7 +34,7 @@ body {
 /* ── Sidebar ── */
 .sidebar {
   width: var(--sidebar-w);
-  background: #fff;
+  background: #fdf8f2;
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -198,7 +198,7 @@ body {
 
 /* ── Progress bar ── */
 .progress-bar-wrap {
-  background: #ece6d8;
+  background: #ddd0be;
   border-radius: 8px;
   height: 8px;
   overflow: hidden;
