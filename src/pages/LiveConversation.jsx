@@ -77,13 +77,13 @@ function TopicIndicator({ status, score, backendReady }) {
 }
 
 // ── Real volume waveform ─────────────────────────────────────────────────────
-function VolumeWaveform({ micActive, streamRef }) {
+function VolumeWaveform({ micActive, streamRef, streamReady }) {
   const [bars, setBars]    = useState(Array(NUM_BARS).fill(4));
   const ctxRef             = useRef(null);
   const rafRef             = useRef(null);
 
   useEffect(() => {
-    if (!micActive || !streamRef.current) {
+    if (!micActive || !streamReady || !streamRef.current) {
       cancelAnimationFrame(rafRef.current);
       if (ctxRef.current) { ctxRef.current.close(); ctxRef.current = null; }
       setBars(Array(NUM_BARS).fill(4));
@@ -114,7 +114,7 @@ function VolumeWaveform({ micActive, streamRef }) {
         ctxRef.current = null;
       };
     } catch { /* no AudioContext */ }
-  }, [micActive, streamRef]);
+  }, [micActive, streamReady, streamRef]);
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 3, height: 48 }}>
@@ -136,6 +136,7 @@ export default function LiveConversation() {
   const [seconds,      setSeconds]      = useState(0);
   const [running,      setRunning]      = useState(false);
   const [micActive,    setMicActive]    = useState(false);
+  const [streamReady,  setStreamReady]  = useState(false);
   const [interim,      setInterim]      = useState('');
   const [micError,     setMicError]     = useState(null);
   const [topicStatus,  setTopicStatus]  = useState('initializing');
@@ -227,11 +228,7 @@ export default function LiveConversation() {
     if (srRef.current) return;
     shouldRunRef.current = true;
 
-    // Get stream for volume visualizer
-    try {
-      streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch { /* visualizer won't work, speech still might */ }
-
+    // SpeechRecognition manages its own mic — visualizer stream attached separately after SR starts
     const sr = new SpeechRecAPI();
     sr.continuous     = true;
     sr.interimResults = true;
@@ -287,7 +284,19 @@ export default function LiveConversation() {
     };
 
     srRef.current = sr;
-    try { sr.start(); } catch (e) { setMicError(`Cannot start mic: ${e.message}`); }
+    try {
+      sr.start();
+      // Attach visualizer stream slightly after SR has started
+      // so SR gets priority on the mic
+      setTimeout(async () => {
+        if (shouldRunRef.current && !streamRef.current) {
+          try {
+            streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+            setStreamReady(true);
+          } catch { /* visualizer optional */ }
+        }
+      }, 500);
+    } catch (e) { setMicError(`Cannot start mic: ${e.message}`); }
   }, [enqueue]);
 
   const stopMic = useCallback(() => {
@@ -297,6 +306,7 @@ export default function LiveConversation() {
     setMicActive(false);
     setInterim('');
     setRunning(false);
+    setStreamReady(false);
   }, []);
 
   useEffect(() => () => stopMic(), [stopMic]);
@@ -423,7 +433,7 @@ export default function LiveConversation() {
 
           {/* ── Mic controls ──────────────────────────────────────────────── */}
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 24 }}>
-            <VolumeWaveform micActive={micActive} streamRef={streamRef} />
+            <VolumeWaveform micActive={micActive} streamRef={streamRef} streamReady={streamReady} />
 
             {/* Mic toggle */}
             <button
