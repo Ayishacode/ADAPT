@@ -1,32 +1,19 @@
 """
 app.py  —  NeuroClarity backend
-Endpoints:
-  GET  /api/health
-  POST /api/session/reset
-  POST /api/topic-shift      { utterance }
-  POST /api/transcribe       multipart: audio file  →  { text }
+GET  /api/health
+POST /api/session/reset   { initial_context? }
+POST /api/topic-shift     { utterance }
+POST /api/transcribe      multipart: audio file  →  { text, topic_status, ... }
 """
 
 import logging
 import tempfile
 import os
-import sys
-
-# ── Make imageio-ffmpeg binary available to Whisper ──────────────────────────
-try:
-    import imageio_ffmpeg as _iio_ffmpeg
-    _ffmpeg_dir = os.path.dirname(_iio_ffmpeg.get_ffmpeg_exe())
-    if _ffmpeg_dir not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
-except Exception:
-    pass
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-
 from topic_detector import TopicSession, SIMILARITY_THRESHOLD
 
-# ── Setup ────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
@@ -35,9 +22,8 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 _session = TopicSession()
-
-# ── Lazy-load Whisper (loads on first transcription request) ─────────────────
 _whisper_model = None
+
 
 def get_whisper():
     global _whisper_model
@@ -49,7 +35,7 @@ def get_whisper():
     return _whisper_model
 
 
-# ── Routes ───────────────────────────────────────────────────────────────────
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/api/health", methods=["GET"])
 def health():
@@ -80,25 +66,25 @@ def topic_shift():
         result = _session.analyze(utterance, threshold=threshold)
     except Exception as exc:
         logger.exception("Topic analysis error: %s", exc)
-        return jsonify({"error": "Internal analysis error."}), 500
+        return jsonify({"error": "Internal error."}), 500
     return jsonify(result), 200
 
 
 @app.route("/api/transcribe", methods=["POST"])
 def transcribe():
     """
-    Converts webm → wav using imageio-ffmpeg subprocess (full binary path),
-    loads wav as numpy array with soundfile, passes to Whisper decode directly.
-    No system ffmpeg or ffprobe needed.
+    Accepts multipart/form-data with 'audio' (webm).
+    Converts to 16kHz wav via imageio-ffmpeg subprocess (full binary path).
+    Runs Whisper base via model.transcribe() — no system ffmpeg needed.
     """
     if "audio" not in request.files:
-        return jsonify({"error": "No audio file in request."}), 400
+        return jsonify({"error": "No audio file."}), 400
 
     audio_file = request.files["audio"]
 
-    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp_in:
-        audio_file.save(tmp_in.name)
-        webm_path = tmp_in.name
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+        audio_file.save(tmp.name)
+        webm_path = tmp.name
 
     wav_path = webm_path.replace(".webm", ".wav")
 
@@ -109,54 +95,45 @@ def transcribe():
         import soundfile as sf
         import whisper as _whisper
 
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()   # full path, always works
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 
-        # ── webm → 16kHz mono wav ─────────────────────────────────────────────
-        # Try webm first, fall back to treating as raw audio if header is missing
-        cmd = [
-            ffmpeg_exe, "-y",
-            "-i", webm_path,
-            "-ar", "16000",
-            "-ac", "1",
-            "-f", "wav",
-            wav_path
-        ]
-        proc = subprocess.run(cmd, capture_output=True, timeout=30)
+        # Convert webm → 16kHz mono wav using the bundled ffmpeg binary
+        proc = subprocess.run(
+            [ffmpeg_exe, "-y", "-i", webm_path,
+             "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
+            capture_output=True, timeout=30
+        )
         if proc.returncode != 0:
             err = proc.stderr.decode(errors="replace")[-300:]
-            logger.error("ffmpeg conversion failed: %s", err)
+            logger.error("ffmpeg error: %s", err)
             return jsonify({"error": f"Audio conversion failed: {err}"}), 500
 
-        # ── Load wav as float32 numpy ─────────────────────────────────────────
+        # Load wav as float32 numpy array
         audio_np, _ = sf.read(wav_path, dtype="float32")
         if audio_np.ndim > 1:
             audio_np = audio_np.mean(axis=1)
 
-        # ── Whisper decode with hallucination suppression ────────────────────
-        model   = get_whisper()
-        audio_p = _whisper.pad_or_trim(audio_np)
-        mel     = _whisper.log_mel_spectrogram(audio_p).to(model.device)
-        opts    = _whisper.DecodingOptions(
-            fp16=False,
+        # Run Whisper — model.transcribe() handles padding internally
+        model = get_whisper()
+        output = model.transcribe(
+            audio_np,
             language="en",
-            without_timestamps=True,
-            # suppress repetition hallucinations
-            suppress_tokens=[-1],
+            fp16=False,
             no_speech_threshold=0.6,
             logprob_threshold=-1.0,
             compression_ratio_threshold=2.0,
+            condition_on_previous_text=False,
         )
-        result  = _whisper.decode(model, mel, opts)
+        raw_text = output["text"].strip()
 
-        # Filter out hallucinated repetitions (e.g. "Pi Pi Pi Pi")
-        raw_text = result.text.strip()
+        # Suppress repetitive hallucinations (e.g. "Pi Pi Pi Pi Pi")
         words = raw_text.split()
-        # If >60% of words are identical it's a hallucination
         if words and (max(words.count(w) for w in set(words)) / len(words)) > 0.6:
-            logger.warning("Hallucination detected, discarding: %r", raw_text[:80])
+            logger.warning("Hallucination discarded: %r", raw_text[:80])
             text = ""
         else:
             text = raw_text
+
         logger.info("Whisper transcript: %r", text)
 
     except Exception as exc:
@@ -187,6 +164,4 @@ def transcribe():
 
 
 if __name__ == "__main__":
-    # use_reloader=False prevents Flask from watching site-packages (whisper/numba)
-    # and killing requests mid-flight
     app.run(host="0.0.0.0", port=5050, debug=True, use_reloader=False)

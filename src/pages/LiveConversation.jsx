@@ -1,23 +1,17 @@
 /**
  * LiveConversation.jsx
- * --------------------
- * Pipeline:
- *   Browser mic  →  MediaRecorder (5-second chunks)
- *     →  POST /api/transcribe  (Whisper base on Flask)
- *     →  transcript shown live
- *     →  topic-shift result from backend (included in same response)
- *     →  🟢 On topic / 🔴 Off topic indicator
- *
- * No Web Speech API — uses real Whisper STT.
+ * Browser mic → MediaRecorder (restart every 5s for valid EBML headers)
+ * → POST /api/transcribe (Whisper on Flask)
+ * → transcript + topic-shift indicator (🟢 / 🔴)
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Square, MessageCircle, BarChart2, Send, Mic, MicOff, Loader } from 'lucide-react';
 
-const API_BASE   = 'http://localhost:5050';
-const CHUNK_MS   = 5000;   // send audio every 5 seconds
-const NUM_BARS   = 14;
+const API_BASE  = 'http://localhost:5050';
+const CHUNK_MS  = 5000;
+const NUM_BARS  = 14;
 
 // ── Utterance row ─────────────────────────────────────────────────────────────
 function UtteranceRow({ entry }) {
@@ -35,9 +29,7 @@ function UtteranceRow({ entry }) {
         boxShadow: skipped ? 'none' : `0 0 6px ${dot}99`,
       }} />
       <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 15, lineHeight: 1.65, color: '#2d2d2d' }}>
-          {entry.text}
-        </div>
+        <div style={{ fontSize: 15, lineHeight: 1.65, color: '#2d2d2d' }}>{entry.text}</div>
         {!skipped && entry.similarity_score != null && (
           <div style={{ fontSize: 11, color: '#aaa', marginTop: 3 }}>
             {onTopic ? '🟢 On topic' : '🔴 Off topic'} · score {entry.similarity_score.toFixed(3)}
@@ -46,29 +38,21 @@ function UtteranceRow({ entry }) {
             )}
           </div>
         )}
-        {skipped && (
-          <div style={{ fontSize: 11, color: '#bbb', marginTop: 2 }}>too short — skipped</div>
-        )}
+        {skipped && <div style={{ fontSize: 11, color: '#bbb', marginTop: 2 }}>too short — skipped</div>}
       </div>
     </div>
   );
 }
 
-// ── Topic indicator pill ──────────────────────────────────────────────────────
+// ── Topic indicator ───────────────────────────────────────────────────────────
 function TopicIndicator({ status, score, backendReady }) {
   const onTopic = status === 'on_topic' || status === 'initializing';
   const skipped = status === 'skipped';
-  const colour  = !backendReady ? '#aaa'
-    : skipped   ? '#aaa'
-    : onTopic   ? '#27ae60'
-    : '#e74c3c';
-  const bg      = !backendReady ? '#f0ece4'
-    : skipped   ? '#f0ece4'
-    : onTopic   ? '#e8f5e8'
-    : '#fee2e2';
+  const colour  = !backendReady ? '#aaa' : skipped ? '#aaa' : onTopic ? '#27ae60' : '#e74c3c';
+  const bg      = !backendReady ? '#f0ece4' : skipped ? '#f0ece4' : onTopic ? '#e8f5e8' : '#fee2e2';
   const label   = !backendReady ? 'Connecting…'
-    : skipped   ? 'Short — skipped'
-    : onTopic   ? 'On topic'
+    : skipped ? 'Short — skipped'
+    : onTopic ? 'On topic'
     : 'Possible topic shift';
   return (
     <div style={{
@@ -81,23 +65,19 @@ function TopicIndicator({ status, score, backendReady }) {
         transition: 'background 0.4s',
         boxShadow: backendReady && !skipped ? `0 0 8px ${colour}cc` : 'none',
       }} />
-      <span style={{ fontSize: 13, fontWeight: 700, color: colour }}>
-        {label}
-      </span>
+      <span style={{ fontSize: 13, fontWeight: 700, color: colour }}>{label}</span>
       {score != null && backendReady && !skipped && (
-        <span style={{ fontSize: 11, color: '#aaa', marginLeft: 4 }}>
-          ({score.toFixed(2)})
-        </span>
+        <span style={{ fontSize: 11, color: '#aaa', marginLeft: 4 }}>({score.toFixed(2)})</span>
       )}
     </div>
   );
 }
 
-// ── Volume waveform (Web Audio API) ──────────────────────────────────────────
+// ── Volume waveform ───────────────────────────────────────────────────────────
 function VolumeWaveform({ stream }) {
   const [bars, setBars] = useState(Array(NUM_BARS).fill(4));
-  const rafRef  = useRef(null);
-  const ctxRef  = useRef(null);
+  const rafRef = useRef(null);
+  const ctxRef = useRef(null);
 
   useEffect(() => {
     if (!stream) {
@@ -107,9 +87,9 @@ function VolumeWaveform({ stream }) {
       return;
     }
     try {
-      const ctx      = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
       ctxRef.current = ctx;
-      const src      = ctx.createMediaStreamSource(stream);
+      const src = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 64;
       src.connect(analyser);
@@ -124,11 +104,7 @@ function VolumeWaveform({ stream }) {
         rafRef.current = requestAnimationFrame(tick);
       };
       tick();
-      return () => {
-        cancelAnimationFrame(rafRef.current);
-        ctx.close();
-        ctxRef.current = null;
-      };
+      return () => { cancelAnimationFrame(rafRef.current); ctx.close(); ctxRef.current = null; };
     } catch { /* no AudioContext */ }
   }, [stream]);
 
@@ -153,9 +129,8 @@ export default function LiveConversation() {
   const [running,      setRunning]      = useState(false);
   const [recording,    setRecording]    = useState(false);
   const [stream,       setStream]       = useState(null);
-  const [processing,   setProcessing]   = useState(false);   // whisper in progress
+  const [processing,   setProcessing]   = useState(false);
   const [micError,     setMicError]     = useState(null);
-
   const [topicStatus,  setTopicStatus]  = useState('initializing');
   const [topicScore,   setTopicScore]   = useState(null);
   const [backendReady, setBackendReady] = useState(false);
@@ -163,11 +138,12 @@ export default function LiveConversation() {
   const [apiError,     setApiError]     = useState(null);
   const [inputText,    setInputText]    = useState('');
 
-  const mediaRecRef  = useRef(null);
-  const intervalRef  = useRef(null);
-  const queueRef     = useRef([]);
-  const procRef      = useRef(false);
-  const bottomRef    = useRef(null);
+  const mediaRecRef = useRef(null);
+  const intervalRef = useRef(null);
+  const queueRef    = useRef([]);
+  const procRef     = useRef(false);
+  const bottomRef   = useRef(null);
+  const streamRef   = useRef(null);   // keep ref in sync for callbacks
 
   // ── Timer ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -182,12 +158,10 @@ export default function LiveConversation() {
   // ── Backend session reset ──────────────────────────────────────────────────
   useEffect(() => {
     fetch(`${API_BASE}/api/session/reset`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
     })
       .then(r => r.ok ? setBackendReady(true) : setApiError('Backend error on reset.'))
-      .catch(() => setApiError('Cannot reach backend on port 5050. Is the Flask server running?'));
+      .catch(() => setApiError('Cannot reach backend on port 5050. Is Flask running?'));
   }, []);
 
   // ── Auto-scroll ────────────────────────────────────────────────────────────
@@ -195,7 +169,7 @@ export default function LiveConversation() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [transcript]);
 
-  // ── Queue processor (sends one audio blob to Whisper at a time) ────────────
+  // ── Queue processor ────────────────────────────────────────────────────────
   const processQueue = useCallback(async () => {
     if (procRef.current || queueRef.current.length === 0) return;
     procRef.current = true;
@@ -203,7 +177,7 @@ export default function LiveConversation() {
 
     while (queueRef.current.length > 0) {
       const blob = queueRef.current.shift();
-      if (!blob || blob.size < 1000) continue;   // skip near-empty chunks
+      if (!blob || blob.size < 5000) continue;
 
       const form = new FormData();
       form.append('audio', blob, 'chunk.webm');
@@ -212,10 +186,8 @@ export default function LiveConversation() {
         const res  = await fetch(`${API_BASE}/api/transcribe`, { method: 'POST', body: form });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-
         if (data.error) { setApiError(data.error); continue; }
-        if (!data.text) continue;   // silence / empty
-
+        if (!data.text) continue;
         setApiError(null);
         setTopicStatus(data.topic_status);
         setTopicScore(data.similarity_score);
@@ -239,7 +211,7 @@ export default function LiveConversation() {
     processQueue();
   }, [processQueue]);
 
-  // ── Manual text submit (still goes through topic-shift only) ──────────────
+  // ── Manual text submit ─────────────────────────────────────────────────────
   const submitText = useCallback(async (text) => {
     const clean = text.trim();
     if (!clean) return;
@@ -265,8 +237,7 @@ export default function LiveConversation() {
   }, []);
 
   // ── Start recording ────────────────────────────────────────────────────────
-  // Key fix: restart MediaRecorder every CHUNK_MS so each blob has a valid
-  // EBML header. Sending continuation fragments causes "EBML header parsing failed".
+  // Each segment is a FRESH MediaRecorder → valid EBML header every time
   const startRecording = useCallback(async () => {
     if (recording) return;
     setMicError(null);
@@ -274,22 +245,23 @@ export default function LiveConversation() {
     let micStream;
     try {
       micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    } catch (err) {
-      setMicError('Microphone access denied. Allow mic in browser settings.');
+    } catch {
+      setMicError('Microphone access denied. Allow mic in browser settings and reload.');
       return;
     }
 
+    streamRef.current = micStream;
     setStream(micStream);
     setRunning(true);
     setRecording(true);
 
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
-      : MediaRecorder.isTypeSupported('audio/webm')
-      ? 'audio/webm' : '';
+      : 'audio/webm';
 
     const startSegment = () => {
-      const mr = new MediaRecorder(micStream, mimeType ? { mimeType } : {});
+      if (!streamRef.current) return;
+      const mr = new MediaRecorder(streamRef.current, { mimeType });
       mediaRecRef.current = mr;
       const localChunks = [];
 
@@ -299,7 +271,7 @@ export default function LiveConversation() {
 
       mr.onstop = () => {
         if (localChunks.length > 0) {
-          const blob = new Blob(localChunks, { type: mimeType || 'audio/webm' });
+          const blob = new Blob(localChunks, { type: mimeType });
           if (blob.size > 5000) enqueueBlob(blob);
         }
       };
@@ -309,14 +281,15 @@ export default function LiveConversation() {
 
     startSegment();
 
-    // Every CHUNK_MS: stop current recorder (fires onstop → send),
-    // then start a fresh one (new EBML header = valid webm)
+    // Every CHUNK_MS: stop current recorder (onstop fires → blob sent to Whisper)
+    // then start a fresh one with a new EBML header
     intervalRef.current = setInterval(() => {
       if (mediaRecRef.current && mediaRecRef.current.state === 'recording') {
         mediaRecRef.current.stop();
         setTimeout(startSegment, 150);
       }
     }, CHUNK_MS);
+
   }, [recording, enqueueBlob]);
 
   // ── Stop recording ─────────────────────────────────────────────────────────
@@ -324,22 +297,21 @@ export default function LiveConversation() {
     clearInterval(intervalRef.current);
     intervalRef.current = null;
 
-    // Stop current recorder — onstop fires and sends final blob
     if (mediaRecRef.current && mediaRecRef.current.state !== 'inactive') {
-      mediaRecRef.current.stop();
+      mediaRecRef.current.stop();   // onstop fires → final blob sent
     }
     mediaRecRef.current = null;
 
-    if (stream) {
-      stream.getTracks().forEach(t => t.stop());
-      setStream(null);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
     }
-
+    setStream(null);
     setRecording(false);
     setRunning(false);
-  }, [stream]);
+  }, []);
 
-  useEffect(() => () => stopRecording(), []);   // cleanup on unmount
+  useEffect(() => () => stopRecording(), []);
 
   const handleStop = () => { stopRecording(); nav('/dashboard'); };
 
@@ -358,7 +330,9 @@ export default function LiveConversation() {
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
             {recording && <div className="pulse-dot" />}
-            {processing && <Loader size={12} style={{ animation: 'spin 1s linear infinite', color: 'var(--blue)' }} />}
+            {processing && (
+              <Loader size={12} style={{ color: 'var(--blue)', animation: 'spin 1s linear infinite' }} />
+            )}
             <span style={{ fontSize: 13, fontWeight: 600, color: recording ? 'var(--red)' : '#888' }}>
               {recording ? 'Recording…' : 'Ready to start'}
               {processing ? ' · transcribing…' : ''}
@@ -367,9 +341,7 @@ export default function LiveConversation() {
           <h1 style={{ fontSize: 26, fontWeight: 800 }}>{fmt(seconds)}</h1>
         </div>
         <button className="btn btn-danger" style={{ fontSize: 15, padding: '12px 28px' }}
-          onClick={handleStop}>
-          ■ Stop
-        </button>
+          onClick={handleStop}>■ Stop</button>
       </div>
 
       {/* Error banner */}
@@ -389,14 +361,13 @@ export default function LiveConversation() {
           { label: 'Conversation', icon: <MessageCircle size={13} /> },
           { label: 'Live Analysis', icon: <BarChart2 size={13} /> },
         ].map((t, i) => (
-          <button key={t.label}
-            onClick={() => i === 1 ? nav('/analysis') : null}
+          <button key={t.label} onClick={() => i === 1 ? nav('/analysis') : null}
             style={{
               padding: '8px 20px', borderRadius: 9, border: 'none', cursor: 'pointer',
               fontSize: 13, fontWeight: 600,
               background: i === 0 ? '#fff' : 'transparent',
-              color:      i === 0 ? 'var(--blue)' : '#888',
-              boxShadow:  i === 0 ? '0 2px 8px rgba(0,0,0,0.07)' : 'none',
+              color: i === 0 ? 'var(--blue)' : '#888',
+              boxShadow: i === 0 ? '0 2px 8px rgba(0,0,0,0.07)' : 'none',
               display: 'flex', alignItems: 'center', gap: 6,
             }}>
             {t.icon}{t.label}
@@ -409,7 +380,7 @@ export default function LiveConversation() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <TopicIndicator status={topicStatus} score={topicScore} backendReady={backendReady} />
 
-          {/* Transcript */}
+          {/* Transcript box */}
           <div className="card" style={{ minHeight: 260, maxHeight: 420, overflowY: 'auto' }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: '#aaa', marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               Live Transcript
@@ -419,15 +390,11 @@ export default function LiveConversation() {
                 </span>
               )}
             </div>
-
             {transcript.length === 0 && (
               <div style={{ fontSize: 15, color: '#bbb', fontStyle: 'italic', textAlign: 'center', padding: '40px 0' }}>
-                {recording
-                  ? 'Whisper transcribing your speech…'
-                  : 'Press the mic button to start recording'}
+                {recording ? 'Whisper transcribing… speak clearly' : 'Press the mic to start recording'}
               </div>
             )}
-
             {transcript.map((e, i) => <UtteranceRow key={i} entry={e} />)}
             <div ref={bottomRef} />
           </div>
@@ -466,21 +433,17 @@ export default function LiveConversation() {
 
           <div style={{ textAlign: 'center', fontSize: 12, color: '#aaa' }}>
             {recording
-              ? 'Recording · Whisper transcribes every 5 seconds · tap to stop'
+              ? 'Recording · Whisper transcribes every 5 s · tap mic to stop'
               : 'Tap the mic to start · powered by Whisper'}
           </div>
 
           {/* Manual input */}
           <form onSubmit={handleSubmit}>
             <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                className="input"
-                value={inputText}
+              <input className="input" value={inputText}
                 onChange={e => setInputText(e.target.value)}
                 placeholder="Or type an utterance manually…"
-                disabled={!backendReady}
-                style={{ flex: 1 }}
-              />
+                disabled={!backendReady} style={{ flex: 1 }} />
               <button type="submit" className="btn btn-primary"
                 disabled={!backendReady || !inputText.trim()}
                 style={{ padding: '10px 16px', flexShrink: 0 }}>
@@ -509,7 +472,6 @@ export default function LiveConversation() {
             ))}
           </div>
 
-          {/* Quick test */}
           <div className="card">
             <div style={{ fontSize: 11, fontWeight: 700, color: '#888', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               Quick Test
@@ -551,8 +513,7 @@ export default function LiveConversation() {
           </div>
         </div>
       </div>
-
-      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+      <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 }
