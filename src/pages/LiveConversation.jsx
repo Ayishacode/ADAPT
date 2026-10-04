@@ -164,7 +164,6 @@ export default function LiveConversation() {
   const [inputText,    setInputText]    = useState('');
 
   const mediaRecRef  = useRef(null);
-  const chunksRef    = useRef([]);
   const intervalRef  = useRef(null);
   const queueRef     = useRef([]);
   const procRef      = useRef(false);
@@ -265,15 +264,9 @@ export default function LiveConversation() {
     }
   }, []);
 
-  // ── Flush current recording buffer ────────────────────────────────────────
-  const flushChunks = useCallback(() => {
-    if (chunksRef.current.length === 0) return;
-    const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-    chunksRef.current = [];
-    enqueueBlob(blob);
-  }, [enqueueBlob]);
-
   // ── Start recording ────────────────────────────────────────────────────────
+  // Key fix: restart MediaRecorder every CHUNK_MS so each blob has a valid
+  // EBML header. Sending continuation fragments causes "EBML header parsing failed".
   const startRecording = useCallback(async () => {
     if (recording) return;
     setMicError(null);
@@ -289,39 +282,53 @@ export default function LiveConversation() {
     setStream(micStream);
     setRunning(true);
     setRecording(true);
-    chunksRef.current = [];
 
-    // Pick best supported format
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
       : MediaRecorder.isTypeSupported('audio/webm')
-      ? 'audio/webm'
-      : '';
+      ? 'audio/webm' : '';
 
-    const mr = new MediaRecorder(micStream, mimeType ? { mimeType } : {});
-    mediaRecRef.current = mr;
+    const startSegment = () => {
+      const mr = new MediaRecorder(micStream, mimeType ? { mimeType } : {});
+      mediaRecRef.current = mr;
+      const localChunks = [];
 
-    mr.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) localChunks.push(e.data);
+      };
+
+      mr.onstop = () => {
+        if (localChunks.length > 0) {
+          const blob = new Blob(localChunks, { type: mimeType || 'audio/webm' });
+          if (blob.size > 5000) enqueueBlob(blob);
+        }
+      };
+
+      mr.start();
     };
 
-    // Collect into chunks, flush every CHUNK_MS
-    mr.start(1000);   // fire ondataavailable every 1s
-    intervalRef.current = setInterval(flushChunks, CHUNK_MS);
-  }, [recording, flushChunks]);
+    startSegment();
+
+    // Every CHUNK_MS: stop current recorder (fires onstop → send),
+    // then start a fresh one (new EBML header = valid webm)
+    intervalRef.current = setInterval(() => {
+      if (mediaRecRef.current && mediaRecRef.current.state === 'recording') {
+        mediaRecRef.current.stop();
+        setTimeout(startSegment, 150);
+      }
+    }, CHUNK_MS);
+  }, [recording, enqueueBlob]);
 
   // ── Stop recording ─────────────────────────────────────────────────────────
   const stopRecording = useCallback(() => {
     clearInterval(intervalRef.current);
     intervalRef.current = null;
 
+    // Stop current recorder — onstop fires and sends final blob
     if (mediaRecRef.current && mediaRecRef.current.state !== 'inactive') {
       mediaRecRef.current.stop();
     }
     mediaRecRef.current = null;
-
-    // Flush remaining audio
-    flushChunks();
 
     if (stream) {
       stream.getTracks().forEach(t => t.stop());
@@ -330,7 +337,7 @@ export default function LiveConversation() {
 
     setRecording(false);
     setRunning(false);
-  }, [stream, flushChunks]);
+  }, [stream]);
 
   useEffect(() => () => stopRecording(), []);   // cleanup on unmount
 

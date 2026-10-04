@@ -112,6 +112,7 @@ def transcribe():
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()   # full path, always works
 
         # ── webm → 16kHz mono wav ─────────────────────────────────────────────
+        # Try webm first, fall back to treating as raw audio if header is missing
         cmd = [
             ffmpeg_exe, "-y",
             "-i", webm_path,
@@ -131,13 +132,31 @@ def transcribe():
         if audio_np.ndim > 1:
             audio_np = audio_np.mean(axis=1)
 
-        # ── Whisper decode (no subprocess, no system ffmpeg needed) ───────────
+        # ── Whisper decode with hallucination suppression ────────────────────
         model   = get_whisper()
         audio_p = _whisper.pad_or_trim(audio_np)
         mel     = _whisper.log_mel_spectrogram(audio_p).to(model.device)
-        opts    = _whisper.DecodingOptions(fp16=False, language="en")
+        opts    = _whisper.DecodingOptions(
+            fp16=False,
+            language="en",
+            without_timestamps=True,
+            # suppress repetition hallucinations
+            suppress_tokens=[-1],
+            no_speech_threshold=0.6,
+            logprob_threshold=-1.0,
+            compression_ratio_threshold=2.0,
+        )
         result  = _whisper.decode(model, mel, opts)
-        text    = result.text.strip()
+
+        # Filter out hallucinated repetitions (e.g. "Pi Pi Pi Pi")
+        raw_text = result.text.strip()
+        words = raw_text.split()
+        # If >60% of words are identical it's a hallucination
+        if words and (max(words.count(w) for w in set(words)) / len(words)) > 0.6:
+            logger.warning("Hallucination detected, discarding: %r", raw_text[:80])
+            text = ""
+        else:
+            text = raw_text
         logger.info("Whisper transcript: %r", text)
 
     except Exception as exc:
