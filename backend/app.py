@@ -87,17 +87,15 @@ def topic_shift():
 @app.route("/api/transcribe", methods=["POST"])
 def transcribe():
     """
-    Accepts multipart/form-data with an 'audio' file (webm).
-    Converts to 16kHz wav using pydub+imageio-ffmpeg (no system ffmpeg needed).
-    Passes numpy audio array directly to Whisper — no subprocess ffmpeg call.
-    Returns { text, topic_status, similarity_score, topic_shift }
+    Converts webm → wav using imageio-ffmpeg subprocess (full binary path),
+    loads wav as numpy array with soundfile, passes to Whisper decode directly.
+    No system ffmpeg or ffprobe needed.
     """
     if "audio" not in request.files:
         return jsonify({"error": "No audio file in request."}), 400
 
     audio_file = request.files["audio"]
 
-    # Save incoming webm
     with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp_in:
         audio_file.save(tmp_in.name)
         webm_path = tmp_in.name
@@ -105,38 +103,41 @@ def transcribe():
     wav_path = webm_path.replace(".webm", ".wav")
 
     try:
-        # ── Convert webm → wav using pydub + imageio-ffmpeg binary ────────────
-        from pydub import AudioSegment
         import imageio_ffmpeg
-        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
-        AudioSegment.converter = ffmpeg_bin
-        AudioSegment.ffmpeg    = ffmpeg_bin
-        AudioSegment.ffprobe   = ffmpeg_bin
-
-        audio_seg = AudioSegment.from_file(webm_path)
-        audio_seg = audio_seg.set_frame_rate(16000).set_channels(1)
-        audio_seg.export(wav_path, format="wav")
-
-        # ── Load wav as numpy float32 array ───────────────────────────────────
+        import subprocess
         import numpy as np
         import soundfile as sf
-        audio_np, sr = sf.read(wav_path, dtype="float32")
+        import whisper as _whisper
+
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()   # full path, always works
+
+        # ── webm → 16kHz mono wav ─────────────────────────────────────────────
+        cmd = [
+            ffmpeg_exe, "-y",
+            "-i", webm_path,
+            "-ar", "16000",
+            "-ac", "1",
+            "-f", "wav",
+            wav_path
+        ]
+        proc = subprocess.run(cmd, capture_output=True, timeout=30)
+        if proc.returncode != 0:
+            err = proc.stderr.decode(errors="replace")[-300:]
+            logger.error("ffmpeg conversion failed: %s", err)
+            return jsonify({"error": f"Audio conversion failed: {err}"}), 500
+
+        # ── Load wav as float32 numpy ─────────────────────────────────────────
+        audio_np, _ = sf.read(wav_path, dtype="float32")
         if audio_np.ndim > 1:
             audio_np = audio_np.mean(axis=1)
 
-        # ── Run Whisper on the numpy array directly ───────────────────────────
-        model = get_whisper()
-        import whisper as _whisper
-        audio_np = _whisper.pad_or_trim(audio_np)
-        mel = _whisper.log_mel_spectrogram(audio_np).to(model.device)
-
-        _, probs = model.detect_language(mel)
-        lang = max(probs, key=probs.get)
-        logger.info("Detected language: %s", lang)
-
-        options = _whisper.DecodingOptions(fp16=False, language="en")
-        decode_result = _whisper.decode(model, mel, options)
-        text = decode_result.text.strip()
+        # ── Whisper decode (no subprocess, no system ffmpeg needed) ───────────
+        model   = get_whisper()
+        audio_p = _whisper.pad_or_trim(audio_np)
+        mel     = _whisper.log_mel_spectrogram(audio_p).to(model.device)
+        opts    = _whisper.DecodingOptions(fp16=False, language="en")
+        result  = _whisper.decode(model, mel, opts)
+        text    = result.text.strip()
         logger.info("Whisper transcript: %r", text)
 
     except Exception as exc:
@@ -167,4 +168,6 @@ def transcribe():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5050, debug=True)
+    # use_reloader=False prevents Flask from watching site-packages (whisper/numba)
+    # and killing requests mid-flight
+    app.run(host="0.0.0.0", port=5050, debug=True, use_reloader=False)
