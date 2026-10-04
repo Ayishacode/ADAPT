@@ -313,7 +313,21 @@ export default function LiveConversation() {
 
   useEffect(() => () => stopRecording(), []);
 
-  const handleStop = () => { stopRecording(); nav('/dashboard'); };
+  const handleStop = () => {
+    stopRecording();
+    // Save session to backend
+    if (transcript.length > 0) {
+      fetch(`${API_BASE}/api/session/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          utterances: transcript,
+          duration_seconds: seconds,
+        }),
+      }).catch(() => {});
+    }
+    nav('/dashboard');
+  };
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -474,33 +488,62 @@ export default function LiveConversation() {
 
           <div className="card">
             <div style={{ fontSize: 11, fontWeight: 700, color: '#888', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              Quick Test
+              Session Results
             </div>
-            <div style={{ fontSize: 11, color: '#aaa', marginBottom: 6 }}>On-topic</div>
-            {[
-              'My project uses AI to analyze communication.',
-              'We use Whisper to convert speech into text.',
-              'The system measures speaking rate and pauses.',
-            ].map((s, i) => (
-              <div key={i} onClick={() => submitText(s)}
-                style={{ padding: '7px 10px', borderRadius: 10, cursor: 'pointer', background: 'var(--blue-light)', color: 'var(--blue)', fontSize: 12, marginBottom: 5, lineHeight: 1.4 }}
-                onMouseEnter={e => e.currentTarget.style.opacity = '0.7'}
-                onMouseLeave={e => e.currentTarget.style.opacity = '1'}>
-                {s}
+
+            {transcript.length === 0 ? (
+              <div style={{ fontSize: 12, color: '#bbb', fontStyle: 'italic', padding: '12px 0', textAlign: 'center' }}>
+                Results will appear here as you speak
               </div>
-            ))}
-            <div style={{ fontSize: 11, color: '#aaa', margin: '8px 0 6px' }}>Off-topic</div>
-            {[
-              'I went shopping with friends yesterday.',
-              'The weather today is really nice.',
-            ].map((s, i) => (
-              <div key={i} onClick={() => submitText(s)}
-                style={{ padding: '7px 10px', borderRadius: 10, cursor: 'pointer', background: '#fee2e2', color: 'var(--red)', fontSize: 12, marginBottom: 5, lineHeight: 1.4 }}
-                onMouseEnter={e => e.currentTarget.style.opacity = '0.7'}
-                onMouseLeave={e => e.currentTarget.style.opacity = '1'}>
-                {s}
-              </div>
-            ))}
+            ) : (
+              <>
+                {/* Group into on-topic and off-topic */}
+                {(() => {
+                  const onTopicItems  = transcript.filter(t => t.topic_status === 'on_topic' || t.topic_status === 'initializing');
+                  const offTopicItems = transcript.filter(t => t.topic_status === 'off_topic');
+                  const skippedItems  = transcript.filter(t => t.topic_status === 'skipped');
+                  return (
+                    <>
+                      {onTopicItems.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, color: '#aaa', marginBottom: 6 }}>On-topic</div>
+                          {onTopicItems.map((t, i) => (
+                            <div key={i} style={{
+                              background: '#e8f0fd', color: '#3a6fd4',
+                              borderRadius: 12, padding: '10px 14px',
+                              fontSize: 13, fontWeight: 500,
+                              marginBottom: 8, lineHeight: 1.5,
+                            }}>
+                              {t.text}
+                            </div>
+                          ))}
+                        </>
+                      )}
+                      {offTopicItems.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, color: '#aaa', margin: '6px 0 6px' }}>Off-topic</div>
+                          {offTopicItems.map((t, i) => (
+                            <div key={i} style={{
+                              background: '#fee2e2', color: '#e05555',
+                              borderRadius: 12, padding: '10px 14px',
+                              fontSize: 13, fontWeight: 500,
+                              marginBottom: 8, lineHeight: 1.5,
+                            }}>
+                              {t.text}
+                            </div>
+                          ))}
+                        </>
+                      )}
+                      {skippedItems.length > 0 && (
+                        <div style={{ fontSize: 11, color: '#ccc', marginTop: 4 }}>
+                          {skippedItems.length} short response{skippedItems.length > 1 ? 's' : ''} skipped
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+              </>
+            )}
           </div>
 
           <div className="card card-sm" style={{ background: backendReady ? '#e8f5e8' : '#fff3e0' }}>

@@ -9,6 +9,8 @@ POST /api/transcribe      multipart: audio file  →  { text, topic_status, ... 
 import logging
 import tempfile
 import os
+import json
+import datetime
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -23,6 +25,23 @@ logger = logging.getLogger(__name__)
 
 _session = TopicSession()
 _whisper_model = None
+
+# ── Session result storage ─────────────────────────────────────────────────────
+# Stores all completed sessions as a list of dicts
+SESSIONS_FILE = os.path.join(os.path.dirname(__file__), "sessions.json")
+
+def load_sessions():
+    if os.path.exists(SESSIONS_FILE):
+        try:
+            with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_sessions(sessions):
+    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(sessions, f, indent=2, ensure_ascii=False)
 
 
 def get_whisper():
@@ -161,6 +180,44 @@ def transcribe():
         "topic_shift":      topic_result["topic_shift"],
         "message":          topic_result.get("message", ""),
     }), 200
+
+
+@app.route("/api/session/save", methods=["POST"])
+def save_session():
+    """
+    Save a completed session's transcript to sessions.json.
+    Body: { utterances: [{text, topic_status, similarity_score, topic_shift}], duration_seconds: int }
+    """
+    body = request.get_json(silent=True)
+    if not body:
+        return jsonify({"error": "JSON body required."}), 400
+
+    sessions = load_sessions()
+    session_entry = {
+        "id":         len(sessions) + 1,
+        "timestamp":  datetime.datetime.now().isoformat(timespec="seconds"),
+        "duration":   body.get("duration_seconds", 0),
+        "utterances": body.get("utterances", []),
+    }
+    sessions.append(session_entry)
+    save_sessions(sessions)
+    logger.info("Session %d saved (%d utterances)", session_entry["id"], len(session_entry["utterances"]))
+    return jsonify({"status": "saved", "session_id": session_entry["id"]}), 200
+
+
+@app.route("/api/sessions", methods=["GET"])
+def get_sessions():
+    """Return all saved sessions."""
+    return jsonify(load_sessions()), 200
+
+
+@app.route("/api/sessions/latest", methods=["GET"])
+def get_latest_session():
+    """Return the most recent saved session."""
+    sessions = load_sessions()
+    if not sessions:
+        return jsonify({"error": "No sessions saved yet."}), 404
+    return jsonify(sessions[-1]), 200
 
 
 if __name__ == "__main__":
