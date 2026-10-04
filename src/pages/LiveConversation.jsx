@@ -1,53 +1,48 @@
 /**
  * LiveConversation.jsx
- * --------------------
- * Real-time speech → topic analysis pipeline:
- *
- *   Browser microphone
- *     ↓  Web Speech API (SpeechRecognition)
- *   Continuous transcript (interim + final)
- *     ↓  on every FINAL result sentence
- *   POST /api/topic-shift  (Flask · all-MiniLM-L6-v2)
- *     ↓  cosine similarity vs rolling context
- *   🟢 On topic  /  🔴 Possible topic shift
- *
- * Works in Chrome / Edge out of the box.
- * Firefox does NOT support SpeechRecognition — a fallback type-box is shown.
+ * Real microphone recording with:
+ * - Web Audio API volume bars (only move when sound is detected)
+ * - Web Speech API continuous recognition
+ * - Interim results also analyzed when >= 6 words (catches phone playback)
+ * - Robust auto-restart on onend
+ * - Topic-shift detection via Flask backend
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Square, Pause, Play, MessageCircle, BarChart2, Send, Mic, MicOff } from 'lucide-react';
+import { Square, MessageCircle, BarChart2, Send, Mic, MicOff } from 'lucide-react';
 
-const API_BASE = 'http://localhost:5050';
+const API_BASE    = 'http://localhost:5050';
 const SR_SUPPORTED = 'SpeechRecognition' in window || 'webkitSpeechRecognition' in window;
 const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+const NUM_BARS    = 12;
+const MIN_INTERIM_WORDS = 6; // analyze long interim chunks even before final
 
-// ── Utterance row ───────────────────────────────────────────────────────────
+// ── Utterance row ────────────────────────────────────────────────────────────
 function UtteranceRow({ entry }) {
-  const isOnTopic = entry.topic_status === 'on_topic' || entry.topic_status === 'initializing';
-  const isSkipped = entry.topic_status === 'skipped';
-  const dot = isSkipped ? '#bbb' : isOnTopic ? 'var(--green)' : 'var(--red)';
-
+  const onTopic = entry.topic_status === 'on_topic' || entry.topic_status === 'initializing';
+  const skipped = entry.topic_status === 'skipped';
+  const dot     = skipped ? '#bbb' : onTopic ? 'var(--green)' : 'var(--red)';
   return (
     <div style={{
       display: 'flex', gap: 10, alignItems: 'flex-start',
       padding: '8px 0', borderBottom: '1px solid var(--border)',
-      opacity: isSkipped ? 0.5 : 1, transition: 'opacity 0.3s',
+      opacity: skipped ? 0.5 : 1,
     }}>
-      <div
-        title={isSkipped ? 'Too short — skipped' : isOnTopic ? 'On topic' : 'Possible topic shift'}
+      <div title={skipped ? 'Too short' : onTopic ? 'On topic' : 'Possible topic shift'}
         style={{
           width: 10, height: 10, borderRadius: '50%', background: dot,
-          marginTop: 5, flexShrink: 0, transition: 'background 0.4s ease',
-          boxShadow: isSkipped ? 'none' : `0 0 6px ${dot}88`,
-        }}
-      />
+          marginTop: 6, flexShrink: 0, transition: 'background 0.4s',
+          boxShadow: skipped ? 'none' : `0 0 6px ${dot}88`,
+        }} />
       <div style={{ flex: 1 }}>
         <div style={{ fontSize: 14, lineHeight: 1.6 }}>{entry.text}</div>
-        {!isSkipped && entry.similarity_score !== null && (
+        {!skipped && entry.similarity_score != null && (
           <div style={{ fontSize: 11, color: '#aaa', marginTop: 2 }}>
             similarity: {entry.similarity_score.toFixed(3)}
+            {entry.topic_shift && (
+              <span style={{ marginLeft: 8, color: 'var(--red)', fontWeight: 600 }}>⚠ shift</span>
+            )}
           </div>
         )}
       </div>
@@ -55,95 +50,154 @@ function UtteranceRow({ entry }) {
   );
 }
 
-// ── Topic indicator ─────────────────────────────────────────────────────────
+// ── Topic indicator ──────────────────────────────────────────────────────────
 function TopicIndicator({ status, score, backendReady }) {
   const onTopic = status === 'on_topic' || status === 'initializing';
   const skipped = status === 'skipped';
   const colour  = !backendReady ? '#bbb' : skipped ? '#bbb' : onTopic ? 'var(--green)' : 'var(--red)';
-  const bg      = !backendReady ? '#f5f5f5' : skipped ? '#f5f5f5' : onTopic ? '#e8f5e8' : '#fee2e2';
+  const bg      = !backendReady ? '#f0ece4' : skipped ? '#f0ece4' : onTopic ? '#e8f5e8' : '#fee2e2';
   const label   = !backendReady ? 'Connecting…'
-    : skipped   ? 'Short response'
-    : onTopic   ? 'On topic'
+    : skipped ? 'Short response'
+    : onTopic ? 'On topic'
     : 'Possible topic shift';
-
   return (
     <div style={{
       display: 'inline-flex', alignItems: 'center', gap: 8,
-      background: bg, borderRadius: 20, padding: '6px 14px',
+      background: bg, borderRadius: 20, padding: '7px 16px',
       transition: 'background 0.4s ease',
     }}>
       <div style={{
-        width: 10, height: 10, borderRadius: '50%', background: colour,
-        transition: 'background 0.4s ease',
-        boxShadow: backendReady && !skipped ? `0 0 6px ${colour}99` : 'none',
+        width: 11, height: 11, borderRadius: '50%', background: colour,
+        transition: 'background 0.4s',
+        boxShadow: backendReady && !skipped ? `0 0 7px ${colour}bb` : 'none',
       }} />
-      <span style={{ fontSize: 13, fontWeight: 600, color: colour, transition: 'color 0.4s' }}>
+      <span style={{ fontSize: 13, fontWeight: 700, color: colour, transition: 'color 0.4s' }}>
         {label}
       </span>
-      {score !== null && backendReady && !skipped && (
-        <span style={{ fontSize: 11, color: '#aaa' }}>({score?.toFixed(2)})</span>
+      {score != null && backendReady && !skipped && (
+        <span style={{ fontSize: 11, color: '#aaa' }}>({score.toFixed(2)})</span>
       )}
     </div>
   );
 }
 
-// ── Main ────────────────────────────────────────────────────────────────────
+// ── Real-time volume waveform (Web Audio API) ────────────────────────────────
+function VolumeWaveform({ micActive, streamRef }) {
+  const canvasRef    = useRef(null);
+  const animFrameRef = useRef(null);
+  const analyserRef  = useRef(null);
+  const dataRef      = useRef(null);
+  const [bars, setBars] = useState(Array(NUM_BARS).fill(4));
+
+  useEffect(() => {
+    if (!micActive || !streamRef.current) {
+      // Mic off — flat bars
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      analyserRef.current = null;
+      setBars(Array(NUM_BARS).fill(4));
+      return;
+    }
+
+    try {
+      const ctx      = new (window.AudioContext || window.webkitAudioContext)();
+      const source   = ctx.createMediaStreamSource(streamRef.current);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 64;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+      dataRef.current     = new Uint8Array(analyser.frequencyBinCount);
+
+      const draw = () => {
+        analyser.getByteFrequencyData(dataRef.current);
+        // Map frequency bins to NUM_BARS
+        const step     = Math.floor(dataRef.current.length / NUM_BARS);
+        const newBars  = Array.from({ length: NUM_BARS }, (_, i) => {
+          const val = dataRef.current[i * step] / 255; // 0–1
+          return Math.max(4, Math.round(val * 44));     // min 4px, max 44px
+        });
+        setBars(newBars);
+        animFrameRef.current = requestAnimationFrame(draw);
+      };
+      draw();
+
+      return () => {
+        cancelAnimationFrame(animFrameRef.current);
+        ctx.close();
+      };
+    } catch {
+      // AudioContext not available — fall back to CSS animation
+    }
+  }, [micActive, streamRef]);
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 3, height: 48 }}>
+      {bars.map((h, i) => (
+        <div key={i} style={{
+          width: 5,
+          height: h,
+          borderRadius: 3,
+          background: micActive ? 'var(--blue)' : '#ccc',
+          transition: micActive ? 'height 0.05s ease' : 'height 0.3s ease, background 0.3s',
+        }} />
+      ))}
+    </div>
+  );
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────────
 export default function LiveConversation() {
   const nav = useNavigate();
 
-  // Timer
   const [seconds,      setSeconds]      = useState(0);
   const [running,      setRunning]      = useState(false);
-
-  // Mic / speech
   const [micActive,    setMicActive]    = useState(false);
-  const [interim,      setInterim]      = useState('');   // live partial text
+  const [interim,      setInterim]      = useState('');
   const [micError,     setMicError]     = useState(null);
-  const srRef = useRef(null);
 
-  // Topic detection
   const [topicStatus,  setTopicStatus]  = useState('initializing');
   const [topicScore,   setTopicScore]   = useState(null);
   const [backendReady, setBackendReady] = useState(false);
   const [transcript,   setTranscript]   = useState([]);
   const [analyzing,    setAnalyzing]    = useState(false);
   const [apiError,     setApiError]     = useState(null);
-
-  // Manual fallback input
   const [inputText,    setInputText]    = useState('');
 
+  const srRef            = useRef(null);
+  const streamRef        = useRef(null);   // MediaStream for Web Audio
+  const shouldRunRef     = useRef(false);  // intent flag for auto-restart
+  const analyzingRef     = useRef(false);  // sync ref for analyzeUtterance
+  const lastInterimRef   = useRef('');     // track last sent interim
   const transcriptEndRef = useRef(null);
-  const tab = 'conversation';
 
-  // ── Timer ────────────────────────────────────────────────────────────────
+  // ── Timer ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!running) return;
     const t = setInterval(() => setSeconds(s => s + 1), 1000);
     return () => clearInterval(t);
   }, [running]);
 
-  const fmt = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  const fmt = s =>
+    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
-  // ── Backend session reset on mount ───────────────────────────────────────
+  // ── Backend session reset ─────────────────────────────────────────────────
   useEffect(() => {
     fetch(`${API_BASE}/api/session/reset`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
     })
-      .then(r => r.ok ? setBackendReady(true) : setApiError('Backend error on session reset.'))
+      .then(r => r.ok ? setBackendReady(true) : setApiError('Backend error.'))
       .catch(() => setApiError('Cannot reach backend on port 5050.'));
   }, []);
 
-  // ── Auto-scroll ──────────────────────────────────────────────────────────
+  // ── Auto-scroll ───────────────────────────────────────────────────────────
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [transcript]);
 
-  // ── Analyse utterance ────────────────────────────────────────────────────
+  // ── Analyse utterance ─────────────────────────────────────────────────────
   const analyzeUtterance = useCallback(async (text) => {
     const clean = text.trim();
-    if (!clean || analyzing) return;
+    if (!clean || analyzingRef.current) return;
+    analyzingRef.current = true;
     setAnalyzing(true);
     try {
       const res = await fetch(`${API_BASE}/api/topic-shift`, {
@@ -157,7 +211,7 @@ export default function LiveConversation() {
       setTopicScore(data.similarity_score);
       setApiError(null);
       setTranscript(prev => [...prev, {
-        text:             clean,
+        text: clean,
         topic_status:     data.topic_status,
         similarity_score: data.similarity_score,
         topic_shift:      data.topic_shift,
@@ -165,17 +219,28 @@ export default function LiveConversation() {
     } catch (err) {
       setApiError(`Analysis failed: ${err.message}`);
     } finally {
+      analyzingRef.current = false;
       setAnalyzing(false);
     }
-  }, [analyzing]);
+  }, []);
 
-  // ── Speech Recognition ───────────────────────────────────────────────────
-  const startMic = useCallback(() => {
+  // ── Start mic ─────────────────────────────────────────────────────────────
+  const startMic = useCallback(async () => {
     if (!SR_SUPPORTED) {
-      setMicError('SpeechRecognition is not supported in this browser. Use Chrome or Edge.');
+      setMicError('SpeechRecognition not supported. Use Chrome or Edge, or type below.');
       return;
     }
-    if (srRef.current) return; // already running
+    if (srRef.current) return;
+
+    shouldRunRef.current = true;
+
+    // Get MediaStream for Web Audio visualizer
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+    } catch {
+      // Visualizer won't work but speech still might
+    }
 
     const sr = new SpeechRecognitionAPI();
     sr.continuous      = true;
@@ -191,56 +256,85 @@ export default function LiveConversation() {
 
     sr.onresult = (event) => {
       let interimText = '';
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
+
         if (result.isFinal) {
           const finalText = result[0].transcript.trim();
-          if (finalText) analyzeUtterance(finalText);
+          if (finalText) {
+            analyzeUtterance(finalText);
+            lastInterimRef.current = '';
+          }
           setInterim('');
         } else {
           interimText += result[0].transcript;
         }
       }
-      if (interimText) setInterim(interimText);
+
+      if (interimText) {
+        setInterim(interimText);
+        // Also analyze long interim chunks (catches phone audio that may not
+        // produce a clean final result before the recognizer resets)
+        const wordCount = interimText.trim().split(/\s+/).length;
+        if (
+          wordCount >= MIN_INTERIM_WORDS &&
+          interimText.trim() !== lastInterimRef.current
+        ) {
+          lastInterimRef.current = interimText.trim();
+          analyzeUtterance(interimText.trim());
+        }
+      }
     };
 
     sr.onerror = (e) => {
-      // 'no-speech' is normal during silence — don't show as error
-      if (e.error === 'no-speech') return;
+      if (e.error === 'no-speech') return;           // normal silence
+      if (e.error === 'aborted') return;             // we called stop()
       if (e.error === 'not-allowed') {
-        setMicError('Microphone access denied. Please allow microphone in browser settings.');
+        setMicError('Microphone access denied. Allow mic in browser settings and try again.');
+        shouldRunRef.current = false;
       } else {
         setMicError(`Mic error: ${e.error}`);
       }
-      stopMic();
     };
 
     sr.onend = () => {
-      // Auto-restart if still supposed to be running (continuous mode sometimes stops)
-      if (srRef.current) {
-        try { srRef.current.start(); } catch { /* ignore */ }
+      // Auto-restart as long as user hasn't explicitly stopped
+      if (shouldRunRef.current) {
+        try { sr.start(); } catch { /* already started */ }
+      } else {
+        setMicActive(false);
+        setRunning(false);
       }
     };
 
     srRef.current = sr;
-    sr.start();
+    try {
+      sr.start();
+    } catch (err) {
+      setMicError(`Could not start mic: ${err.message}`);
+    }
   }, [analyzeUtterance]);
 
+  // ── Stop mic ──────────────────────────────────────────────────────────────
   const stopMic = useCallback(() => {
+    shouldRunRef.current = false;
     if (srRef.current) {
-      srRef.current.onend = null; // prevent auto-restart
       srRef.current.stop();
       srRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
     }
     setMicActive(false);
     setInterim('');
     setRunning(false);
   }, []);
 
-  // Cleanup on unmount
   useEffect(() => () => stopMic(), [stopMic]);
 
-  // Manual input submit
+  // ── Manual submit ─────────────────────────────────────────────────────────
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!inputText.trim()) return;
@@ -248,9 +342,10 @@ export default function LiveConversation() {
     setInputText('');
   };
 
+  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div>
-      {/* ── Header ───────────────────────────────────────────────────────── */}
+      {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
@@ -267,7 +362,7 @@ export default function LiveConversation() {
         </button>
       </div>
 
-      {/* ── Error banners ─────────────────────────────────────────────────── */}
+      {/* Error banner */}
       {(apiError || micError) && (
         <div style={{
           background: '#fee2e2', border: '1.5px solid #fca5a5',
@@ -278,28 +373,27 @@ export default function LiveConversation() {
         </div>
       )}
 
-      {/* ── Tab bar ──────────────────────────────────────────────────────── */}
+      {/* Tab bar */}
       <div style={{ display: 'flex', gap: 4, background: '#ddd0be', borderRadius: 12, padding: 4, width: 'fit-content', marginBottom: 20 }}>
-        {['conversation', 'live analysis'].map(t => (
+        {['Conversation', 'Live Analysis'].map((t, i) => (
           <button key={t}
-            onClick={() => t === 'live analysis' ? nav('/analysis') : null}
+            onClick={() => i === 1 ? nav('/analysis') : null}
             style={{
               padding: '8px 20px', borderRadius: 9, border: 'none', cursor: 'pointer',
               fontSize: 13, fontWeight: 600, transition: 'all 0.15s',
-              background: t === 'conversation' ? '#fff' : 'transparent',
-              color:      t === 'conversation' ? 'var(--blue)' : '#888',
-              boxShadow:  t === 'conversation' ? '0 2px 8px rgba(0,0,0,0.07)' : 'none',
-              textTransform: 'capitalize',
+              background: i === 0 ? '#fff' : 'transparent',
+              color:      i === 0 ? 'var(--blue)' : '#888',
+              boxShadow:  i === 0 ? '0 2px 8px rgba(0,0,0,0.07)' : 'none',
             }}>
-            {t === 'conversation'
-              ? <><MessageCircle size={13} style={{ marginRight: 5 }} />Conversation</>
-              : <><BarChart2 size={13} style={{ marginRight: 5 }} />Live Analysis</>}
+            {i === 0
+              ? <><MessageCircle size={13} style={{ marginRight: 5 }} />{t}</>
+              : <><BarChart2 size={13} style={{ marginRight: 5 }} />{t}</>}
           </button>
         ))}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 270px', gap: 24 }}>
-        {/* ── Left ─────────────────────────────────────────────────────── */}
+        {/* Left */}
         <div>
           {/* Topic indicator */}
           <div style={{ marginBottom: 14 }}>
@@ -311,86 +405,76 @@ export default function LiveConversation() {
             <div style={{ fontSize: 11, fontWeight: 700, color: '#aaa', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               Live Transcript
             </div>
-
             {transcript.length === 0 && !interim && (
-              <div style={{ fontSize: 14, color: '#bbb', fontStyle: 'italic', padding: '16px 0', textAlign: 'center' }}>
+              <div style={{ fontSize: 14, color: '#bbb', fontStyle: 'italic', padding: '20px 0', textAlign: 'center' }}>
                 {micActive ? 'Speak now…' : 'Press the mic button to start'}
               </div>
             )}
-
             {transcript.map((e, i) => <UtteranceRow key={i} entry={e} />)}
-
-            {/* Live interim (grey, not yet analysed) */}
             {interim && (
               <div style={{
-                padding: '8px 0', fontSize: 14, color: '#aaa',
-                fontStyle: 'italic', lineHeight: 1.6,
+                padding: '8px 0', fontSize: 14, color: '#aaa', fontStyle: 'italic', lineHeight: 1.6,
                 borderTop: transcript.length ? '1px dashed var(--border)' : 'none',
                 marginTop: transcript.length ? 4 : 0,
               }}>
-                <span style={{ marginRight: 8, fontSize: 12 }}>🎙</span>{interim}
+                🎙 {interim}
               </div>
             )}
             <div ref={transcriptEndRef} />
           </div>
 
-          {/* ── Mic button + waveform ──────────────────────────────────── */}
-          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 20, marginBottom: 16 }}>
-            {/* Waveform — only animates when mic is live */}
-            <div className="waveform">
-              {[...Array(8)].map((_, i) => (
-                <div key={i} className="wave-bar"
-                  style={{ height: micActive ? undefined : 6, background: micActive ? 'var(--blue)' : '#ccc' }} />
-              ))}
-            </div>
+          {/* Volume waveform + mic button */}
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 22, marginBottom: 12 }}>
+            <VolumeWaveform micActive={micActive} streamRef={streamRef} />
 
-            {/* Main mic button */}
+            {/* Mic toggle button */}
             <button
-              className="btn"
               title={micActive ? 'Stop recording' : 'Start recording'}
+              onClick={() => micActive ? stopMic() : startMic()}
               style={{
-                width: 72, height: 72, borderRadius: '50%', padding: 0,
+                width: 72, height: 72, borderRadius: '50%', border: 'none', cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
                 background: micActive
                   ? 'linear-gradient(135deg,#e05555,#c0392b)'
                   : 'linear-gradient(135deg,#4a8eff,#6c63ff)',
                 color: '#fff',
                 boxShadow: micActive
-                  ? '0 0 0 6px rgba(224,85,85,0.2), 0 4px 20px rgba(224,85,85,0.4)'
+                  ? '0 0 0 8px rgba(224,85,85,0.18), 0 4px 20px rgba(224,85,85,0.4)'
                   : '0 4px 20px rgba(74,142,255,0.35)',
                 transition: 'all 0.25s ease',
-                border: 'none', cursor: 'pointer',
               }}
-              onClick={() => micActive ? stopMic() : startMic()}
             >
               {micActive ? <MicOff size={28} /> : <Mic size={28} />}
             </button>
 
-            {/* Stop session button */}
+            {/* Stop session */}
             <button
-              className="btn btn-danger"
-              style={{ width: 52, height: 52, borderRadius: '50%', padding: 0 }}
-              onClick={() => { stopMic(); nav('/summary'); }}>
-              <Square size={18} fill="var(--red)" />
+              onClick={() => { stopMic(); nav('/summary'); }}
+              style={{
+                width: 50, height: 50, borderRadius: '50%', border: 'none', cursor: 'pointer',
+                background: '#fee2e2', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+              <Square size={18} fill="var(--red)" color="var(--red)" />
             </button>
           </div>
 
-          {/* Mic status hint */}
-          <div style={{ textAlign: 'center', fontSize: 12, color: '#aaa', marginBottom: 14 }}>
+          {/* Status hint */}
+          <div style={{ textAlign: 'center', fontSize: 12, color: '#aaa', marginBottom: 16 }}>
             {!SR_SUPPORTED
-              ? '⚠ Speech API not supported — use the text input below'
+              ? '⚠ Speech not supported in this browser — type below instead'
               : micActive
-              ? 'Recording… tap mic to pause'
+              ? 'Recording — bars show live mic volume · tap to stop'
               : 'Tap the mic to start recording'}
           </div>
 
-          {/* Manual / fallback text input */}
+          {/* Manual / fallback input */}
           <form onSubmit={handleSubmit}>
             <div style={{ display: 'flex', gap: 8 }}>
               <input
                 className="input"
                 value={inputText}
                 onChange={e => setInputText(e.target.value)}
-                placeholder={SR_SUPPORTED ? 'Or type an utterance manually…' : 'Type your utterance here…'}
+                placeholder="Or type an utterance manually…"
                 disabled={!backendReady || analyzing}
                 style={{ flex: 1 }}
               />
@@ -406,20 +490,19 @@ export default function LiveConversation() {
           </form>
         </div>
 
-        {/* ── Right ────────────────────────────────────────────────────── */}
+        {/* Right */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-
           {/* Live metrics */}
           <div className="card">
             <div style={{ fontSize: 11, fontWeight: 700, color: '#888', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               Live Metrics
             </div>
             {[
-              { label: 'Utterances',  value: transcript.length },
-              { label: 'Topic shifts',value: transcript.filter(t => t.topic_shift).length },
-              { label: 'On-topic',    value: transcript.filter(t => t.topic_status === 'on_topic').length },
-              { label: 'Off-topic',   value: transcript.filter(t => t.topic_status === 'off_topic').length },
-              { label: 'Skipped',     value: transcript.filter(t => t.topic_status === 'skipped').length },
+              { label: 'Utterances',   value: transcript.length },
+              { label: 'Topic shifts', value: transcript.filter(t => t.topic_shift).length },
+              { label: 'On-topic',     value: transcript.filter(t => t.topic_status === 'on_topic').length },
+              { label: 'Off-topic',    value: transcript.filter(t => t.topic_status === 'off_topic').length },
+              { label: 'Skipped',      value: transcript.filter(t => t.topic_status === 'skipped').length },
             ].map(m => (
               <div className="metric-row" key={m.label}>
                 <span style={{ fontSize: 12, color: '#666' }}>{m.label}</span>
@@ -428,7 +511,7 @@ export default function LiveConversation() {
             ))}
           </div>
 
-          {/* Quick test sentences */}
+          {/* Quick test */}
           <div className="card">
             <div style={{ fontSize: 11, fontWeight: 700, color: '#888', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               Quick Test
@@ -440,10 +523,10 @@ export default function LiveConversation() {
               'The system measures speaking rate and pauses.',
             ].map((s, i) => (
               <div key={i} onClick={() => analyzeUtterance(s)}
-                style={{ padding: '7px 10px', borderRadius: 10, cursor: 'pointer', background: 'var(--blue-light)', color: 'var(--blue)', fontSize: 12, marginBottom: 5, lineHeight: 1.4 }}
+                style={{ padding: '7px 10px', borderRadius: 10, cursor: 'pointer', background: 'var(--blue-light)', color: 'var(--blue)', fontSize: 12, marginBottom: 5, lineHeight: 1.4, transition: 'opacity 0.15s' }}
                 onMouseEnter={e => e.currentTarget.style.opacity = '0.7'}
                 onMouseLeave={e => e.currentTarget.style.opacity = '1'}>
-                {s.length > 55 ? s.slice(0, 55) + '…' : s}
+                {s}
               </div>
             ))}
             <div style={{ fontSize: 11, color: '#aaa', margin: '8px 0 6px' }}>Off-topic</div>
@@ -452,7 +535,7 @@ export default function LiveConversation() {
               'The weather today is really nice.',
             ].map((s, i) => (
               <div key={i} onClick={() => analyzeUtterance(s)}
-                style={{ padding: '7px 10px', borderRadius: 10, cursor: 'pointer', background: '#fee2e2', color: 'var(--red)', fontSize: 12, marginBottom: 5, lineHeight: 1.4 }}
+                style={{ padding: '7px 10px', borderRadius: 10, cursor: 'pointer', background: '#fee2e2', color: 'var(--red)', fontSize: 12, marginBottom: 5, lineHeight: 1.4, transition: 'opacity 0.15s' }}
                 onMouseEnter={e => e.currentTarget.style.opacity = '0.7'}
                 onMouseLeave={e => e.currentTarget.style.opacity = '1'}>
                 {s}
