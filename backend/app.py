@@ -10,6 +10,16 @@ Endpoints:
 import logging
 import tempfile
 import os
+import sys
+
+# ── Make imageio-ffmpeg binary available to Whisper ──────────────────────────
+try:
+    import imageio_ffmpeg as _iio_ffmpeg
+    _ffmpeg_dir = os.path.dirname(_iio_ffmpeg.get_ffmpeg_exe())
+    if _ffmpeg_dir not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+except Exception:
+    pass
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -77,47 +87,70 @@ def topic_shift():
 @app.route("/api/transcribe", methods=["POST"])
 def transcribe():
     """
-    Accepts a multipart/form-data upload with an 'audio' file (webm/ogg/wav).
-    Returns { text: "..." } using Whisper base model.
-    Also automatically runs topic-shift detection on the transcript
-    and returns the full result.
+    Accepts multipart/form-data with an 'audio' file (webm).
+    Converts to 16kHz wav using pydub+imageio-ffmpeg (no system ffmpeg needed).
+    Passes numpy audio array directly to Whisper — no subprocess ffmpeg call.
+    Returns { text, topic_status, similarity_score, topic_shift }
     """
     if "audio" not in request.files:
         return jsonify({"error": "No audio file in request."}), 400
 
     audio_file = request.files["audio"]
-    if audio_file.filename == "":
-        return jsonify({"error": "Empty filename."}), 400
 
-    # Save to a temp file — Whisper needs a file path
-    suffix = ".webm"
-    if "." in audio_file.filename:
-        suffix = "." + audio_file.filename.rsplit(".", 1)[-1]
+    # Save incoming webm
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp_in:
+        audio_file.save(tmp_in.name)
+        webm_path = tmp_in.name
 
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        audio_file.save(tmp.name)
-        tmp_path = tmp.name
+    wav_path = webm_path.replace(".webm", ".wav")
 
     try:
-        model  = get_whisper()
-        result = model.transcribe(tmp_path, language="en", fp16=False)
-        text   = result["text"].strip()
+        # ── Convert webm → wav using pydub + imageio-ffmpeg binary ────────────
+        from pydub import AudioSegment
+        import imageio_ffmpeg
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        AudioSegment.converter = ffmpeg_bin
+        AudioSegment.ffmpeg    = ffmpeg_bin
+        AudioSegment.ffprobe   = ffmpeg_bin
+
+        audio_seg = AudioSegment.from_file(webm_path)
+        audio_seg = audio_seg.set_frame_rate(16000).set_channels(1)
+        audio_seg.export(wav_path, format="wav")
+
+        # ── Load wav as numpy float32 array ───────────────────────────────────
+        import numpy as np
+        import soundfile as sf
+        audio_np, sr = sf.read(wav_path, dtype="float32")
+        if audio_np.ndim > 1:
+            audio_np = audio_np.mean(axis=1)
+
+        # ── Run Whisper on the numpy array directly ───────────────────────────
+        model = get_whisper()
+        import whisper as _whisper
+        audio_np = _whisper.pad_or_trim(audio_np)
+        mel = _whisper.log_mel_spectrogram(audio_np).to(model.device)
+
+        _, probs = model.detect_language(mel)
+        lang = max(probs, key=probs.get)
+        logger.info("Detected language: %s", lang)
+
+        options = _whisper.DecodingOptions(fp16=False, language="en")
+        decode_result = _whisper.decode(model, mel, options)
+        text = decode_result.text.strip()
         logger.info("Whisper transcript: %r", text)
+
     except Exception as exc:
-        logger.exception("Whisper transcription error: %s", exc)
-        os.unlink(tmp_path)
-        return jsonify({"error": "Transcription failed."}), 500
+        logger.exception("Transcription error: %s", exc)
+        return jsonify({"error": str(exc)}), 500
     finally:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
+        for p in [webm_path, wav_path]:
+            try: os.unlink(p)
+            except Exception: pass
 
     if not text:
         return jsonify({"text": "", "topic_status": "skipped",
                         "similarity_score": None, "topic_shift": False}), 200
 
-    # Run topic detection on the fresh transcript
     try:
         topic_result = _session.analyze(text)
     except Exception:
