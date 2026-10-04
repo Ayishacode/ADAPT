@@ -13,7 +13,7 @@ const features = [
 export default function NewConversation() {
   const nav = useNavigate();
   const [enabled, setEnabled] = useState({
-    self_summary: true, other_summary: true, word_suggest: true, offtopic: true, popup: true,
+    self_summary: false, other_summary: false, word_suggest: false, offtopic: true, popup: false,
   });
 
   const toggle = id => setEnabled(p => ({ ...p, [id]: !p[id] }));
