@@ -1,114 +1,137 @@
 """
-app.py
-------
-Flask API backend for NeuroClarity.
-
-Endpoints
----------
-POST /api/topic-shift          — analyse a single utterance
-POST /api/session/reset        — reset the session for a new conversation
-GET  /api/health               — health check
-
-The server stores ONE session per process (single-user demo).
-For multi-user production, replace the global session with a
-per-session-id store (dict keyed by session UUID).
+app.py  —  NeuroClarity backend
+Endpoints:
+  GET  /api/health
+  POST /api/session/reset
+  POST /api/topic-shift      { utterance }
+  POST /api/transcribe       multipart: audio file  →  { text }
 """
 
 import logging
+import tempfile
+import os
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 from topic_detector import TopicSession, SIMILARITY_THRESHOLD
 
-# ── App setup ────────────────────────────────────────────────────────────────
+# ── Setup ────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})   # allow Vite dev server
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# Global session (single-user; replace with per-user dict for multi-user)
 _session = TopicSession()
+
+# ── Lazy-load Whisper (loads on first transcription request) ─────────────────
+_whisper_model = None
+
+def get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        import whisper
+        logger.info("Loading Whisper model (base)…")
+        _whisper_model = whisper.load_model("base")
+        logger.info("Whisper ready.")
+    return _whisper_model
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "model": "all-MiniLM-L6-v2"}), 200
+    return jsonify({"status": "ok", "model": "all-MiniLM-L6-v2 + Whisper base"}), 200
 
 
 @app.route("/api/session/reset", methods=["POST"])
 def reset_session():
-    """
-    Call this when the user starts a new conversation.
-    Optionally accepts a JSON body with an 'initial_context' sentence
-    (e.g. the chosen topic name) to seed the context.
-    """
     _session.reset()
-
     body = request.get_json(silent=True) or {}
-    initial_context = body.get("initial_context", "").strip()
-
-    if initial_context:
-        _session.analyze(initial_context)
-        logger.info("Session reset and seeded with topic: %r", initial_context)
-        return jsonify({
-            "status": "reset",
-            "seeded_with": initial_context,
-        }), 200
-
-    logger.info("Session reset (no seed).")
+    ctx  = body.get("initial_context", "").strip()
+    if ctx:
+        _session.analyze(ctx)
+        return jsonify({"status": "reset", "seeded_with": ctx}), 200
     return jsonify({"status": "reset"}), 200
 
 
 @app.route("/api/topic-shift", methods=["POST"])
 def topic_shift():
-    """
-    Analyse a transcribed utterance for topic relevance.
-
-    Request body (JSON)
-    -------------------
-    {
-        "utterance": "I went shopping with my friends yesterday.",
-        "threshold": 0.55   // optional override
-    }
-
-    Response (JSON)
-    ---------------
-    {
-        "topic_status":     "off_topic",
-        "similarity_score": 0.31,
-        "topic_shift":      true,
-        "utterance_count":  5,
-        "message":          "..."
-    }
-    """
     body = request.get_json(silent=True)
-
     if not body:
-        return jsonify({"error": "Request body must be JSON."}), 400
-
+        return jsonify({"error": "JSON body required."}), 400
     utterance = body.get("utterance", "")
     if not isinstance(utterance, str):
         return jsonify({"error": "'utterance' must be a string."}), 400
-
-    threshold = body.get("threshold", SIMILARITY_THRESHOLD)
-    try:
-        threshold = float(threshold)
-        if not (0.0 <= threshold <= 1.0):
-            raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({"error": "'threshold' must be a float between 0 and 1."}), 400
-
+    threshold = float(body.get("threshold", SIMILARITY_THRESHOLD))
     try:
         result = _session.analyze(utterance, threshold=threshold)
     except Exception as exc:
-        logger.exception("Error during topic analysis: %s", exc)
-        return jsonify({"error": "Internal error during analysis."}), 500
-
+        logger.exception("Topic analysis error: %s", exc)
+        return jsonify({"error": "Internal analysis error."}), 500
     return jsonify(result), 200
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+@app.route("/api/transcribe", methods=["POST"])
+def transcribe():
+    """
+    Accepts a multipart/form-data upload with an 'audio' file (webm/ogg/wav).
+    Returns { text: "..." } using Whisper base model.
+    Also automatically runs topic-shift detection on the transcript
+    and returns the full result.
+    """
+    if "audio" not in request.files:
+        return jsonify({"error": "No audio file in request."}), 400
+
+    audio_file = request.files["audio"]
+    if audio_file.filename == "":
+        return jsonify({"error": "Empty filename."}), 400
+
+    # Save to a temp file — Whisper needs a file path
+    suffix = ".webm"
+    if "." in audio_file.filename:
+        suffix = "." + audio_file.filename.rsplit(".", 1)[-1]
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        audio_file.save(tmp.name)
+        tmp_path = tmp.name
+
+    try:
+        model  = get_whisper()
+        result = model.transcribe(tmp_path, language="en", fp16=False)
+        text   = result["text"].strip()
+        logger.info("Whisper transcript: %r", text)
+    except Exception as exc:
+        logger.exception("Whisper transcription error: %s", exc)
+        os.unlink(tmp_path)
+        return jsonify({"error": "Transcription failed."}), 500
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+    if not text:
+        return jsonify({"text": "", "topic_status": "skipped",
+                        "similarity_score": None, "topic_shift": False}), 200
+
+    # Run topic detection on the fresh transcript
+    try:
+        topic_result = _session.analyze(text)
+    except Exception:
+        topic_result = {"topic_status": "skipped", "similarity_score": None,
+                        "topic_shift": False, "message": ""}
+
+    return jsonify({
+        "text":             text,
+        "topic_status":     topic_result["topic_status"],
+        "similarity_score": topic_result["similarity_score"],
+        "topic_shift":      topic_result["topic_shift"],
+        "message":          topic_result.get("message", ""),
+    }), 200
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5050, debug=True)

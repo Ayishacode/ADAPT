@@ -1,13 +1,25 @@
+/**
+ * LiveConversation.jsx
+ * --------------------
+ * Pipeline:
+ *   Browser mic  →  MediaRecorder (5-second chunks)
+ *     →  POST /api/transcribe  (Whisper base on Flask)
+ *     →  transcript shown live
+ *     →  topic-shift result from backend (included in same response)
+ *     →  🟢 On topic / 🔴 Off topic indicator
+ *
+ * No Web Speech API — uses real Whisper STT.
+ */
+
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Square, MessageCircle, BarChart2, Send, Mic, MicOff } from 'lucide-react';
+import { Square, MessageCircle, BarChart2, Send, Mic, MicOff, Loader } from 'lucide-react';
 
-const API_BASE         = 'http://localhost:5050';
-const SR_SUPPORTED     = 'SpeechRecognition' in window || 'webkitSpeechRecognition' in window;
-const SpeechRecAPI     = window.SpeechRecognition || window.webkitSpeechRecognition;
-const NUM_BARS         = 14;
+const API_BASE   = 'http://localhost:5050';
+const CHUNK_MS   = 5000;   // send audio every 5 seconds
+const NUM_BARS   = 14;
 
-// ── Utterance row ────────────────────────────────────────────────────────────
+// ── Utterance row ─────────────────────────────────────────────────────────────
 function UtteranceRow({ entry }) {
   const onTopic = entry.topic_status === 'on_topic' || entry.topic_status === 'initializing';
   const skipped = entry.topic_status === 'skipped';
@@ -23,22 +35,26 @@ function UtteranceRow({ entry }) {
         boxShadow: skipped ? 'none' : `0 0 6px ${dot}99`,
       }} />
       <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 15, lineHeight: 1.65, color: '#2d2d2d' }}>{entry.text}</div>
+        <div style={{ fontSize: 15, lineHeight: 1.65, color: '#2d2d2d' }}>
+          {entry.text}
+        </div>
         {!skipped && entry.similarity_score != null && (
           <div style={{ fontSize: 11, color: '#aaa', marginTop: 3 }}>
             {onTopic ? '🟢 On topic' : '🔴 Off topic'} · score {entry.similarity_score.toFixed(3)}
-            {entry.topic_shift && <span style={{ marginLeft: 8, color: '#e74c3c', fontWeight: 700 }}> ⚠ topic shift</span>}
+            {entry.topic_shift && (
+              <span style={{ marginLeft: 8, color: '#e74c3c', fontWeight: 700 }}>⚠ topic shift</span>
+            )}
           </div>
         )}
         {skipped && (
-          <div style={{ fontSize: 11, color: '#bbb', marginTop: 3 }}>too short — skipped</div>
+          <div style={{ fontSize: 11, color: '#bbb', marginTop: 2 }}>too short — skipped</div>
         )}
       </div>
     </div>
   );
 }
 
-// ── Topic status pill ────────────────────────────────────────────────────────
+// ── Topic indicator pill ──────────────────────────────────────────────────────
 function TopicIndicator({ status, score, backendReady }) {
   const onTopic = status === 'on_topic' || status === 'initializing';
   const skipped = status === 'skipped';
@@ -54,36 +70,37 @@ function TopicIndicator({ status, score, backendReady }) {
     : skipped   ? 'Short — skipped'
     : onTopic   ? 'On topic'
     : 'Possible topic shift';
-
   return (
     <div style={{
       display: 'inline-flex', alignItems: 'center', gap: 8,
       background: bg, borderRadius: 20, padding: '7px 16px',
-      transition: 'background 0.4s',
+      transition: 'background 0.4s', width: '100%',
     }}>
       <div style={{
-        width: 11, height: 11, borderRadius: '50%',
-        background: colour, transition: 'background 0.4s',
+        width: 11, height: 11, borderRadius: '50%', background: colour,
+        transition: 'background 0.4s',
         boxShadow: backendReady && !skipped ? `0 0 8px ${colour}cc` : 'none',
       }} />
       <span style={{ fontSize: 13, fontWeight: 700, color: colour }}>
         {label}
       </span>
       {score != null && backendReady && !skipped && (
-        <span style={{ fontSize: 11, color: '#aaa' }}>({score.toFixed(2)})</span>
+        <span style={{ fontSize: 11, color: '#aaa', marginLeft: 4 }}>
+          ({score.toFixed(2)})
+        </span>
       )}
     </div>
   );
 }
 
-// ── Real volume waveform ─────────────────────────────────────────────────────
-function VolumeWaveform({ micActive, streamRef, streamReady }) {
-  const [bars, setBars]    = useState(Array(NUM_BARS).fill(4));
-  const ctxRef             = useRef(null);
-  const rafRef             = useRef(null);
+// ── Volume waveform (Web Audio API) ──────────────────────────────────────────
+function VolumeWaveform({ stream }) {
+  const [bars, setBars] = useState(Array(NUM_BARS).fill(4));
+  const rafRef  = useRef(null);
+  const ctxRef  = useRef(null);
 
   useEffect(() => {
-    if (!micActive || !streamReady || !streamRef.current) {
+    if (!stream) {
       cancelAnimationFrame(rafRef.current);
       if (ctxRef.current) { ctxRef.current.close(); ctxRef.current = null; }
       setBars(Array(NUM_BARS).fill(4));
@@ -92,13 +109,12 @@ function VolumeWaveform({ micActive, streamRef, streamReady }) {
     try {
       const ctx      = new (window.AudioContext || window.webkitAudioContext)();
       ctxRef.current = ctx;
-      const src      = ctx.createMediaStreamSource(streamRef.current);
+      const src      = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 64;
       src.connect(analyser);
       const data = new Uint8Array(analyser.frequencyBinCount);
       const step = Math.max(1, Math.floor(data.length / NUM_BARS));
-
       const tick = () => {
         analyser.getByteFrequencyData(data);
         setBars(Array.from({ length: NUM_BARS }, (_, i) => {
@@ -114,31 +130,32 @@ function VolumeWaveform({ micActive, streamRef, streamReady }) {
         ctxRef.current = null;
       };
     } catch { /* no AudioContext */ }
-  }, [micActive, streamReady, streamRef]);
+  }, [stream]);
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 3, height: 48 }}>
       {bars.map((h, i) => (
         <div key={i} style={{
           width: 5, height: h, borderRadius: 3,
-          background: micActive ? 'var(--blue)' : '#ccc',
-          transition: micActive ? 'height 0.06s' : 'height 0.4s, background 0.3s',
+          background: stream ? 'var(--blue)' : '#ccc',
+          transition: stream ? 'height 0.06s' : 'height 0.4s, background 0.3s',
         }} />
       ))}
     </div>
   );
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
+// ── Main ──────────────────────────────────────────────────────────────────────
 export default function LiveConversation() {
   const nav = useNavigate();
 
   const [seconds,      setSeconds]      = useState(0);
   const [running,      setRunning]      = useState(false);
-  const [micActive,    setMicActive]    = useState(false);
-  const [streamReady,  setStreamReady]  = useState(false);
-  const [interim,      setInterim]      = useState('');
+  const [recording,    setRecording]    = useState(false);
+  const [stream,       setStream]       = useState(null);
+  const [processing,   setProcessing]   = useState(false);   // whisper in progress
   const [micError,     setMicError]     = useState(null);
+
   const [topicStatus,  setTopicStatus]  = useState('initializing');
   const [topicScore,   setTopicScore]   = useState(null);
   const [backendReady, setBackendReady] = useState(false);
@@ -146,16 +163,14 @@ export default function LiveConversation() {
   const [apiError,     setApiError]     = useState(null);
   const [inputText,    setInputText]    = useState('');
 
-  const srRef          = useRef(null);
-  const streamRef      = useRef(null);
-  const shouldRunRef   = useRef(false);
-  // Queue: array of strings waiting to be analysed
-  const queueRef       = useRef([]);
-  const processingRef  = useRef(false);
-  const lastInterimRef = useRef('');
-  const bottomRef      = useRef(null);
+  const mediaRecRef  = useRef(null);
+  const chunksRef    = useRef([]);
+  const intervalRef  = useRef(null);
+  const queueRef     = useRef([]);
+  const procRef      = useRef(false);
+  const bottomRef    = useRef(null);
 
-  // ── Timer ─────────────────────────────────────────────────────────────────
+  // ── Timer ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!running) return;
     const t = setInterval(() => setSeconds(s => s + 1), 1000);
@@ -165,185 +180,192 @@ export default function LiveConversation() {
   const fmt = s =>
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
-  // ── Backend reset ─────────────────────────────────────────────────────────
+  // ── Backend session reset ──────────────────────────────────────────────────
   useEffect(() => {
     fetch(`${API_BASE}/api/session/reset`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
     })
-      .then(r => r.ok ? setBackendReady(true) : setApiError('Backend error.'))
+      .then(r => r.ok ? setBackendReady(true) : setApiError('Backend error on reset.'))
       .catch(() => setApiError('Cannot reach backend on port 5050. Is the Flask server running?'));
   }, []);
 
-  // ── Auto-scroll ───────────────────────────────────────────────────────────
+  // ── Auto-scroll ────────────────────────────────────────────────────────────
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [transcript, interim]);
+  }, [transcript]);
 
-  // ── Queue processor ───────────────────────────────────────────────────────
-  // Processes one utterance at a time; drains the queue after each response.
+  // ── Queue processor (sends one audio blob to Whisper at a time) ────────────
   const processQueue = useCallback(async () => {
-    if (processingRef.current || queueRef.current.length === 0) return;
-    processingRef.current = true;
+    if (procRef.current || queueRef.current.length === 0) return;
+    procRef.current = true;
+    setProcessing(true);
 
     while (queueRef.current.length > 0) {
-      const text = queueRef.current.shift();
-      if (!text) continue;
+      const blob = queueRef.current.shift();
+      if (!blob || blob.size < 1000) continue;   // skip near-empty chunks
+
+      const form = new FormData();
+      form.append('audio', blob, 'chunk.webm');
+
       try {
-        const res  = await fetch(`${API_BASE}/api/topic-shift`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ utterance: text }),
-        });
+        const res  = await fetch(`${API_BASE}/api/transcribe`, { method: 'POST', body: form });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
+
+        if (data.error) { setApiError(data.error); continue; }
+        if (!data.text) continue;   // silence / empty
+
+        setApiError(null);
         setTopicStatus(data.topic_status);
         setTopicScore(data.similarity_score);
-        setApiError(null);
         setTranscript(prev => [...prev, {
-          text,
+          text:             data.text,
           topic_status:     data.topic_status,
           similarity_score: data.similarity_score,
           topic_shift:      data.topic_shift,
         }]);
       } catch (err) {
-        setApiError(`Analysis error: ${err.message}`);
+        setApiError(`Transcription error: ${err.message}`);
       }
     }
-    processingRef.current = false;
+
+    procRef.current = false;
+    setProcessing(false);
   }, []);
 
-  const enqueue = useCallback((text) => {
-    const clean = text.trim();
-    if (!clean) return;
-    queueRef.current.push(clean);
+  const enqueueBlob = useCallback((blob) => {
+    queueRef.current.push(blob);
     processQueue();
   }, [processQueue]);
 
-  // ── Speech recognition ────────────────────────────────────────────────────
-  const startMic = useCallback(async () => {
-    if (!SR_SUPPORTED) {
-      setMicError('SpeechRecognition not supported. Use Chrome or Edge, or type below.');
-      return;
-    }
-    if (srRef.current) return;
-    shouldRunRef.current = true;
-
-    // SpeechRecognition manages its own mic — visualizer stream attached separately after SR starts
-    const sr = new SpeechRecAPI();
-    sr.continuous     = true;
-    sr.interimResults = true;
-    sr.lang           = 'en-US';
-
-    sr.onstart = () => { setMicActive(true); setRunning(true); setMicError(null); };
-
-    sr.onresult = (event) => {
-      let interimBuf = '';
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const r = event.results[i];
-        if (r.isFinal) {
-          const t = r[0].transcript.trim();
-          if (t) { enqueue(t); lastInterimRef.current = ''; }
-          setInterim('');
-        } else {
-          interimBuf += r[0].transcript;
-        }
-      }
-      if (interimBuf) {
-        setInterim(interimBuf);
-        // Send long interim chunks immediately (handles phone audio bursts)
-        const words = interimBuf.trim().split(/\s+/).length;
-        if (words >= 5 && interimBuf.trim() !== lastInterimRef.current) {
-          lastInterimRef.current = interimBuf.trim();
-          enqueue(interimBuf.trim());
-        }
-      }
-    };
-
-    sr.onerror = (e) => {
-      if (e.error === 'no-speech' || e.error === 'aborted') return;
-      if (e.error === 'not-allowed') {
-        setMicError('Microphone blocked. Allow mic in browser permissions and reload.');
-        shouldRunRef.current = false;
-      } else {
-        setMicError(`Mic error: ${e.error}`);
-      }
-    };
-
-    sr.onend = () => {
-      if (shouldRunRef.current) {
-        // Brief delay then restart to avoid rapid-fire restarts
-        setTimeout(() => {
-          if (shouldRunRef.current && srRef.current) {
-            try { srRef.current.start(); } catch { /* already starting */ }
-          }
-        }, 200);
-      } else {
-        setMicActive(false);
-        setRunning(false);
-      }
-    };
-
-    srRef.current = sr;
+  // ── Manual text submit (still goes through topic-shift only) ──────────────
+  const submitText = useCallback(async (text) => {
+    const clean = text.trim();
+    if (!clean) return;
     try {
-      sr.start();
-      // Attach visualizer stream slightly after SR has started
-      // so SR gets priority on the mic
-      setTimeout(async () => {
-        if (shouldRunRef.current && !streamRef.current) {
-          try {
-            streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-            setStreamReady(true);
-          } catch { /* visualizer optional */ }
-        }
-      }, 500);
-    } catch (e) { setMicError(`Cannot start mic: ${e.message}`); }
-  }, [enqueue]);
-
-  const stopMic = useCallback(() => {
-    shouldRunRef.current = false;
-    if (srRef.current) { srRef.current.stop(); srRef.current = null; }
-    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-    setMicActive(false);
-    setInterim('');
-    setRunning(false);
-    setStreamReady(false);
+      const res  = await fetch(`${API_BASE}/api/topic-shift`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ utterance: clean }),
+      });
+      const data = await res.json();
+      setTopicStatus(data.topic_status);
+      setTopicScore(data.similarity_score);
+      setApiError(null);
+      setTranscript(prev => [...prev, {
+        text: clean,
+        topic_status:     data.topic_status,
+        similarity_score: data.similarity_score,
+        topic_shift:      data.topic_shift,
+      }]);
+    } catch (err) {
+      setApiError(`Error: ${err.message}`);
+    }
   }, []);
 
-  useEffect(() => () => stopMic(), [stopMic]);
+  // ── Flush current recording buffer ────────────────────────────────────────
+  const flushChunks = useCallback(() => {
+    if (chunksRef.current.length === 0) return;
+    const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+    chunksRef.current = [];
+    enqueueBlob(blob);
+  }, [enqueueBlob]);
 
-  const handleStop = () => { stopMic(); nav('/dashboard'); };
+  // ── Start recording ────────────────────────────────────────────────────────
+  const startRecording = useCallback(async () => {
+    if (recording) return;
+    setMicError(null);
+
+    let micStream;
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (err) {
+      setMicError('Microphone access denied. Allow mic in browser settings.');
+      return;
+    }
+
+    setStream(micStream);
+    setRunning(true);
+    setRecording(true);
+    chunksRef.current = [];
+
+    // Pick best supported format
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/webm')
+      ? 'audio/webm'
+      : '';
+
+    const mr = new MediaRecorder(micStream, mimeType ? { mimeType } : {});
+    mediaRecRef.current = mr;
+
+    mr.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+    };
+
+    // Collect into chunks, flush every CHUNK_MS
+    mr.start(1000);   // fire ondataavailable every 1s
+    intervalRef.current = setInterval(flushChunks, CHUNK_MS);
+  }, [recording, flushChunks]);
+
+  // ── Stop recording ─────────────────────────────────────────────────────────
+  const stopRecording = useCallback(() => {
+    clearInterval(intervalRef.current);
+    intervalRef.current = null;
+
+    if (mediaRecRef.current && mediaRecRef.current.state !== 'inactive') {
+      mediaRecRef.current.stop();
+    }
+    mediaRecRef.current = null;
+
+    // Flush remaining audio
+    flushChunks();
+
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      setStream(null);
+    }
+
+    setRecording(false);
+    setRunning(false);
+  }, [stream, flushChunks]);
+
+  useEffect(() => () => stopRecording(), []);   // cleanup on unmount
+
+  const handleStop = () => { stopRecording(); nav('/dashboard'); };
 
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!inputText.trim()) return;
-    enqueue(inputText);
+    submitText(inputText);
     setInputText('');
   };
 
   // ─────────────────────────────────────────────────────────────────────────
   return (
     <div>
-      {/* ── Header ────────────────────────────────────────────────────────── */}
+      {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-            {micActive && <div className="pulse-dot" />}
-            <span style={{ fontSize: 13, fontWeight: 600, color: micActive ? 'var(--red)' : '#888' }}>
-              {micActive ? 'Listening…' : 'Ready to start'}
+            {recording && <div className="pulse-dot" />}
+            {processing && <Loader size={12} style={{ animation: 'spin 1s linear infinite', color: 'var(--blue)' }} />}
+            <span style={{ fontSize: 13, fontWeight: 600, color: recording ? 'var(--red)' : '#888' }}>
+              {recording ? 'Recording…' : 'Ready to start'}
+              {processing ? ' · transcribing…' : ''}
             </span>
           </div>
           <h1 style={{ fontSize: 26, fontWeight: 800 }}>{fmt(seconds)}</h1>
         </div>
-        <button
-          className="btn btn-danger"
-          style={{ fontSize: 15, padding: '12px 28px' }}
-          onClick={handleStop}
-        >
+        <button className="btn btn-danger" style={{ fontSize: 15, padding: '12px 28px' }}
+          onClick={handleStop}>
           ■ Stop
         </button>
       </div>
 
-      {/* ── Error banner ──────────────────────────────────────────────────── */}
+      {/* Error banner */}
       {(apiError || micError) && (
         <div style={{
           background: '#fee2e2', border: '1.5px solid #fca5a5',
@@ -354,7 +376,7 @@ export default function LiveConversation() {
         </div>
       )}
 
-      {/* ── Tab bar ───────────────────────────────────────────────────────── */}
+      {/* Tab bar */}
       <div style={{ display: 'flex', gap: 4, background: '#ddd0be', borderRadius: 12, padding: 4, width: 'fit-content', marginBottom: 18 }}>
         {[
           { label: 'Conversation', icon: <MessageCircle size={13} /> },
@@ -375,88 +397,57 @@ export default function LiveConversation() {
         ))}
       </div>
 
-      {/* ── Body ──────────────────────────────────────────────────────────── */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 270px', gap: 24 }}>
-
-        {/* Left column */}
+        {/* Left */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-
-          {/* Topic indicator */}
           <TopicIndicator status={topicStatus} score={topicScore} backendReady={backendReady} />
 
-          {/* ── Transcript box ─────────────────────────────────────────── */}
-          <div className="card" style={{
-            flex: 1, minHeight: 260, maxHeight: 420,
-            overflowY: 'auto', padding: '16px 18px',
-          }}>
-            <div style={{
-              fontSize: 11, fontWeight: 700, color: '#aaa',
-              marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5,
-            }}>
+          {/* Transcript */}
+          <div className="card" style={{ minHeight: 260, maxHeight: 420, overflowY: 'auto' }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#aaa', marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               Live Transcript
+              {processing && (
+                <span style={{ marginLeft: 10, color: 'var(--blue)', fontWeight: 400, textTransform: 'none', fontSize: 11 }}>
+                  ⏳ Whisper processing…
+                </span>
+              )}
             </div>
 
-            {/* Empty state */}
-            {transcript.length === 0 && !interim && (
-              <div style={{
-                fontSize: 15, color: '#ccc', fontStyle: 'italic',
-                textAlign: 'center', padding: '40px 0',
-              }}>
-                {micActive ? 'Speak now…' : 'Press the mic button below to start'}
+            {transcript.length === 0 && (
+              <div style={{ fontSize: 15, color: '#bbb', fontStyle: 'italic', textAlign: 'center', padding: '40px 0' }}>
+                {recording
+                  ? 'Whisper transcribing your speech…'
+                  : 'Press the mic button to start recording'}
               </div>
             )}
 
-            {/* Committed utterances */}
             {transcript.map((e, i) => <UtteranceRow key={i} entry={e} />)}
-
-            {/* Live interim — shown in real time as you speak */}
-            {interim && (
-              <div style={{
-                display: 'flex', gap: 10, alignItems: 'flex-start',
-                padding: '10px 0',
-                borderTop: transcript.length ? '1px dashed #e2d5c0' : 'none',
-                marginTop: transcript.length ? 4 : 0,
-              }}>
-                <div style={{
-                  width: 10, height: 10, borderRadius: '50%',
-                  background: '#4a8eff', marginTop: 6, flexShrink: 0,
-                  animation: 'pulse 1s infinite',
-                }} />
-                <div style={{ fontSize: 15, color: '#888', fontStyle: 'italic', lineHeight: 1.65 }}>
-                  {interim}
-                </div>
-              </div>
-            )}
-
             <div ref={bottomRef} />
           </div>
 
-          {/* ── Mic controls ──────────────────────────────────────────────── */}
+          {/* Mic controls */}
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 24 }}>
-            <VolumeWaveform micActive={micActive} streamRef={streamRef} streamReady={streamReady} />
+            <VolumeWaveform stream={stream} />
 
-            {/* Mic toggle */}
             <button
-              onClick={() => micActive ? stopMic() : startMic()}
-              title={micActive ? 'Stop recording' : 'Start recording'}
+              onClick={() => recording ? stopRecording() : startRecording()}
               style={{
                 width: 72, height: 72, borderRadius: '50%', border: 'none',
                 cursor: 'pointer', flexShrink: 0,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: micActive
+                background: recording
                   ? 'linear-gradient(135deg,#e05555,#c0392b)'
                   : 'linear-gradient(135deg,#4a8eff,#6c63ff)',
                 color: '#fff',
-                boxShadow: micActive
+                boxShadow: recording
                   ? '0 0 0 8px rgba(224,85,85,0.18), 0 4px 20px rgba(224,85,85,0.4)'
                   : '0 4px 20px rgba(74,142,255,0.35)',
                 transition: 'all 0.25s',
               }}>
-              {micActive ? <MicOff size={28} /> : <Mic size={28} />}
+              {recording ? <MicOff size={28} /> : <Mic size={28} />}
             </button>
 
-            {/* End session */}
-            <button onClick={handleStop} title="End session"
+            <button onClick={handleStop}
               style={{
                 width: 52, height: 52, borderRadius: '50%', border: 'none',
                 cursor: 'pointer', background: '#fee2e2', flexShrink: 0,
@@ -466,16 +457,13 @@ export default function LiveConversation() {
             </button>
           </div>
 
-          {/* Hint */}
           <div style={{ textAlign: 'center', fontSize: 12, color: '#aaa' }}>
-            {!SR_SUPPORTED
-              ? '⚠ Speech not supported — type below'
-              : micActive
-              ? 'Recording · bars reflect mic volume · tap mic to stop'
-              : 'Tap the mic to start · bars will move when sound is detected'}
+            {recording
+              ? 'Recording · Whisper transcribes every 5 seconds · tap to stop'
+              : 'Tap the mic to start · powered by Whisper'}
           </div>
 
-          {/* Manual / fallback input */}
+          {/* Manual input */}
           <form onSubmit={handleSubmit}>
             <div style={{ display: 'flex', gap: 8 }}>
               <input
@@ -495,10 +483,8 @@ export default function LiveConversation() {
           </form>
         </div>
 
-        {/* Right column */}
+        {/* Right */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-
-          {/* Live metrics */}
           <div className="card">
             <div style={{ fontSize: 11, fontWeight: 700, color: '#888', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               Live Metrics
@@ -508,7 +494,6 @@ export default function LiveConversation() {
               { label: 'Topic shifts', value: transcript.filter(t => t.topic_shift).length },
               { label: 'On-topic',     value: transcript.filter(t => t.topic_status === 'on_topic').length },
               { label: 'Off-topic',    value: transcript.filter(t => t.topic_status === 'off_topic').length },
-              { label: 'Skipped',      value: transcript.filter(t => t.topic_status === 'skipped').length },
             ].map(m => (
               <div className="metric-row" key={m.label}>
                 <span style={{ fontSize: 12, color: '#666' }}>{m.label}</span>
@@ -528,7 +513,7 @@ export default function LiveConversation() {
               'We use Whisper to convert speech into text.',
               'The system measures speaking rate and pauses.',
             ].map((s, i) => (
-              <div key={i} onClick={() => enqueue(s)}
+              <div key={i} onClick={() => submitText(s)}
                 style={{ padding: '7px 10px', borderRadius: 10, cursor: 'pointer', background: 'var(--blue-light)', color: 'var(--blue)', fontSize: 12, marginBottom: 5, lineHeight: 1.4 }}
                 onMouseEnter={e => e.currentTarget.style.opacity = '0.7'}
                 onMouseLeave={e => e.currentTarget.style.opacity = '1'}>
@@ -540,7 +525,7 @@ export default function LiveConversation() {
               'I went shopping with friends yesterday.',
               'The weather today is really nice.',
             ].map((s, i) => (
-              <div key={i} onClick={() => enqueue(s)}
+              <div key={i} onClick={() => submitText(s)}
                 style={{ padding: '7px 10px', borderRadius: 10, cursor: 'pointer', background: '#fee2e2', color: 'var(--red)', fontSize: 12, marginBottom: 5, lineHeight: 1.4 }}
                 onMouseEnter={e => e.currentTarget.style.opacity = '0.7'}
                 onMouseLeave={e => e.currentTarget.style.opacity = '1'}>
@@ -549,17 +534,18 @@ export default function LiveConversation() {
             ))}
           </div>
 
-          {/* Backend status */}
           <div className="card card-sm" style={{ background: backendReady ? '#e8f5e8' : '#fff3e0' }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: backendReady ? '#27ae60' : 'var(--orange)' }}>
               {backendReady ? '🟢 Backend connected' : '🟡 Connecting…'}
             </div>
             <div style={{ fontSize: 11, color: '#888', marginTop: 3 }}>
-              all-MiniLM-L6-v2 · port 5050
+              Whisper base + all-MiniLM-L6-v2 · port 5050
             </div>
           </div>
         </div>
       </div>
+
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 }
