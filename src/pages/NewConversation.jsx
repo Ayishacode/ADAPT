@@ -117,7 +117,7 @@ export default function NewConversation() {
               <button
                 className="btn btn-primary"
                 style={{ fontSize: 17, padding: '15px 44px', borderRadius: 50, flexShrink: 0 }}
-                onClick={() => nav('/live')}
+                onClick={() => nav('/live', { state: { topic } })}
               >
                 ▶ Confirm
               </button>
