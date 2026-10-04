@@ -92,7 +92,7 @@ export default function NewConversation() {
             <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
               <div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--green)' }} />
               <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 600 }}>
-                Web Speech API — no installation needed
+                Ready to use
               </span>
             </div>
           </div>
