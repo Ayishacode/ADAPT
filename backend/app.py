@@ -3,7 +3,10 @@ app.py  —  NeuroClarity backend
 GET  /api/health
 POST /api/session/reset   { initial_context? }
 POST /api/topic-shift     { utterance }
-POST /api/transcribe      multipart: audio file  →  { text, topic_status, ... }
+POST /api/transcribe      multipart: audio file
+POST /api/session/save    { utterances, duration_seconds, metrics }
+GET  /api/sessions
+GET  /api/sessions/latest
 """
 
 import logging
@@ -12,9 +15,12 @@ import os
 import json
 import datetime
 
+import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from topic_detector import TopicSession, SIMILARITY_THRESHOLD
+
+from topic_detector  import TopicSession, SIMILARITY_THRESHOLD
+from speech_metrics  import MetricsSession
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -23,26 +29,15 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-_session = TopicSession()
-_whisper_model = None
+_topic_session   = TopicSession()
+_metrics_session = MetricsSession()
+_whisper_model   = None
+_sbert_model     = None
 
-# ── Session result storage ─────────────────────────────────────────────────────
-# Stores all completed sessions as a list of dicts
 SESSIONS_FILE = os.path.join(os.path.dirname(__file__), "sessions.json")
 
-def load_sessions():
-    if os.path.exists(SESSIONS_FILE):
-        try:
-            with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return []
-    return []
 
-def save_sessions(sessions):
-    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
-        json.dump(sessions, f, indent=2, ensure_ascii=False)
-
+# ── Lazy model loaders ────────────────────────────────────────────────────────
 
 def get_whisper():
     global _whisper_model
@@ -54,20 +49,49 @@ def get_whisper():
     return _whisper_model
 
 
+def get_sbert():
+    global _sbert_model
+    if _sbert_model is None:
+        from sentence_transformers import SentenceTransformer
+        logger.info("Loading SBERT model…")
+        _sbert_model = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.info("SBERT ready.")
+    return _sbert_model
+
+
+# ── Session file helpers ───────────────────────────────────────────────────────
+
+def load_sessions():
+    if os.path.exists(SESSIONS_FILE):
+        try:
+            with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_sessions(sessions):
+    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(sessions, f, indent=2, ensure_ascii=False)
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "model": "all-MiniLM-L6-v2 + Whisper base"}), 200
+    return jsonify({"status": "ok",
+                    "model": "all-MiniLM-L6-v2 + Whisper base"}), 200
 
 
 @app.route("/api/session/reset", methods=["POST"])
 def reset_session():
-    _session.reset()
+    _topic_session.reset()
+    _metrics_session.reset()
     body = request.get_json(silent=True) or {}
     ctx  = body.get("initial_context", "").strip()
     if ctx:
-        _session.analyze(ctx)
+        _topic_session.analyze(ctx)
         return jsonify({"status": "reset", "seeded_with": ctx}), 200
     return jsonify({"status": "reset"}), 200
 
@@ -82,7 +106,7 @@ def topic_shift():
         return jsonify({"error": "'utterance' must be a string."}), 400
     threshold = float(body.get("threshold", SIMILARITY_THRESHOLD))
     try:
-        result = _session.analyze(utterance, threshold=threshold)
+        result = _topic_session.analyze(utterance, threshold=threshold)
     except Exception as exc:
         logger.exception("Topic analysis error: %s", exc)
         return jsonify({"error": "Internal error."}), 500
@@ -93,8 +117,7 @@ def topic_shift():
 def transcribe():
     """
     Accepts multipart/form-data with 'audio' (webm).
-    Converts to 16kHz wav via imageio-ffmpeg subprocess (full binary path).
-    Runs Whisper base via model.transcribe() — no system ffmpeg needed.
+    Returns transcript + all 5 real communication metrics.
     """
     if "audio" not in request.files:
         return jsonify({"error": "No audio file."}), 400
@@ -110,13 +133,12 @@ def transcribe():
     try:
         import imageio_ffmpeg
         import subprocess
-        import numpy as np
         import soundfile as sf
         import whisper as _whisper
 
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 
-        # Convert webm → 16kHz mono wav using the bundled ffmpeg binary
+        # ── webm → 16kHz mono wav ─────────────────────────────────────────────
         proc = subprocess.run(
             [ffmpeg_exe, "-y", "-i", webm_path,
              "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
@@ -124,20 +146,21 @@ def transcribe():
         )
         if proc.returncode != 0:
             err = proc.stderr.decode(errors="replace")[-300:]
-            logger.error("ffmpeg error: %s", err)
             return jsonify({"error": f"Audio conversion failed: {err}"}), 500
 
-        # Load wav as float32 numpy array
-        audio_np, _ = sf.read(wav_path, dtype="float32")
+        # ── Load wav ──────────────────────────────────────────────────────────
+        audio_np, sr = sf.read(wav_path, dtype="float32")
         if audio_np.ndim > 1:
             audio_np = audio_np.mean(axis=1)
+        duration_sec = len(audio_np) / sr
 
-        # Run Whisper — model.transcribe() handles padding internally
-        model = get_whisper()
+        # ── Whisper with word timestamps ──────────────────────────────────────
+        model  = get_whisper()
         output = model.transcribe(
             audio_np,
             language="en",
             fp16=False,
+            word_timestamps=True,          # ← needed for pause detection
             no_speech_threshold=0.6,
             logprob_threshold=-1.0,
             compression_ratio_threshold=2.0,
@@ -145,15 +168,24 @@ def transcribe():
         )
         raw_text = output["text"].strip()
 
-        # Suppress repetitive hallucinations (e.g. "Pi Pi Pi Pi Pi")
+        # ── Hallucination filter ──────────────────────────────────────────────
         words = raw_text.split()
         if words and (max(words.count(w) for w in set(words)) / len(words)) > 0.6:
             logger.warning("Hallucination discarded: %r", raw_text[:80])
             text = ""
         else:
             text = raw_text
-
         logger.info("Whisper transcript: %r", text)
+
+        # ── Extract word-level timestamps from Whisper segments ───────────────
+        whisper_words = []
+        for seg in output.get("segments", []):
+            for w in seg.get("words", []):
+                whisper_words.append({
+                    "word":  w.get("word", "").strip(),
+                    "start": w.get("start", 0.0),
+                    "end":   w.get("end",   0.0),
+                })
 
     except Exception as exc:
         logger.exception("Transcription error: %s", exc)
@@ -164,56 +196,74 @@ def transcribe():
             except Exception: pass
 
     if not text:
-        return jsonify({"text": "", "topic_status": "skipped",
-                        "similarity_score": None, "topic_shift": False}), 200
+        return jsonify({
+            "text": "", "topic_status": "skipped",
+            "similarity_score": None, "topic_shift": False,
+            "metrics": None,
+        }), 200
 
+    # ── Topic detection ───────────────────────────────────────────────────────
     try:
-        topic_result = _session.analyze(text)
+        topic_result = _topic_session.analyze(text)
     except Exception:
         topic_result = {"topic_status": "skipped", "similarity_score": None,
                         "topic_shift": False, "message": ""}
 
+    topic_score = topic_result.get("similarity_score")
+
+    # ── SBERT embedding for this utterance ────────────────────────────────────
+    try:
+        sbert     = get_sbert()
+        embedding = sbert.encode(text, convert_to_numpy=True, normalize_embeddings=True)
+    except Exception as exc:
+        logger.warning("SBERT embedding failed: %s", exc)
+        embedding = np.zeros(384)
+
+    # ── Compute all 5 metrics ─────────────────────────────────────────────────
+    metrics = _metrics_session.update(
+        text         = text,
+        whisper_words= whisper_words,
+        duration_sec = duration_sec,
+        embedding    = embedding,
+        topic_score  = topic_score,
+    )
+
     return jsonify({
         "text":             text,
         "topic_status":     topic_result["topic_status"],
-        "similarity_score": topic_result["similarity_score"],
+        "similarity_score": topic_score,
         "topic_shift":      topic_result["topic_shift"],
         "message":          topic_result.get("message", ""),
+        "metrics":          metrics,
     }), 200
 
 
 @app.route("/api/session/save", methods=["POST"])
 def save_session():
-    """
-    Save a completed session's transcript to sessions.json.
-    Body: { utterances: [{text, topic_status, similarity_score, topic_shift}], duration_seconds: int }
-    """
     body = request.get_json(silent=True)
     if not body:
         return jsonify({"error": "JSON body required."}), 400
-
     sessions = load_sessions()
-    session_entry = {
+    entry = {
         "id":         len(sessions) + 1,
         "timestamp":  datetime.datetime.now().isoformat(timespec="seconds"),
         "duration":   body.get("duration_seconds", 0),
         "utterances": body.get("utterances", []),
+        "metrics":    body.get("metrics", {}),
     }
-    sessions.append(session_entry)
+    sessions.append(entry)
     save_sessions(sessions)
-    logger.info("Session %d saved (%d utterances)", session_entry["id"], len(session_entry["utterances"]))
-    return jsonify({"status": "saved", "session_id": session_entry["id"]}), 200
+    logger.info("Session %d saved (%d utterances)", entry["id"], len(entry["utterances"]))
+    return jsonify({"status": "saved", "session_id": entry["id"]}), 200
 
 
 @app.route("/api/sessions", methods=["GET"])
 def get_sessions():
-    """Return all saved sessions."""
     return jsonify(load_sessions()), 200
 
 
 @app.route("/api/sessions/latest", methods=["GET"])
 def get_latest_session():
-    """Return the most recent saved session."""
     sessions = load_sessions()
     if not sessions:
         return jsonify({"error": "No sessions saved yet."}), 404

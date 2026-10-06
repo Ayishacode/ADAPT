@@ -137,6 +137,8 @@ export default function LiveConversation() {
   const [transcript,   setTranscript]   = useState([]);
   const [apiError,     setApiError]     = useState(null);
   const [inputText,    setInputText]    = useState('');
+  // Live metrics — updated after every Whisper chunk
+  const [liveMetrics,  setLiveMetrics]  = useState(null);
 
   const mediaRecRef = useRef(null);
   const intervalRef = useRef(null);
@@ -191,11 +193,13 @@ export default function LiveConversation() {
         setApiError(null);
         setTopicStatus(data.topic_status);
         setTopicScore(data.similarity_score);
+        if (data.metrics) setLiveMetrics(data.metrics.session);
         setTranscript(prev => [...prev, {
           text:             data.text,
           topic_status:     data.topic_status,
           similarity_score: data.similarity_score,
           topic_shift:      data.topic_shift,
+          metrics:          data.metrics,
         }]);
       } catch (err) {
         setApiError(`Transcription error: ${err.message}`);
@@ -323,6 +327,7 @@ export default function LiveConversation() {
         body: JSON.stringify({
           utterances: transcript,
           duration_seconds: seconds,
+          metrics: liveMetrics,
         }),
       }).catch(() => {});
     }
@@ -375,7 +380,7 @@ export default function LiveConversation() {
           { label: 'Conversation', icon: <MessageCircle size={13} /> },
           { label: 'Live Analysis', icon: <BarChart2 size={13} /> },
         ].map((t, i) => (
-          <button key={t.label} onClick={() => i === 1 ? nav('/analysis') : null}
+          <button key={t.label} onClick={() => i === 1 ? nav('/analysis', { state: { metrics: liveMetrics, topicStatus, topicScore, transcript } }) : null}
             style={{
               padding: '8px 20px', borderRadius: 9, border: 'none', cursor: 'pointer',
               fontSize: 13, fontWeight: 600,
@@ -473,17 +478,33 @@ export default function LiveConversation() {
             <div style={{ fontSize: 11, fontWeight: 700, color: '#888', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
               Live Metrics
             </div>
-            {[
-              { label: 'Utterances',   value: transcript.length },
-              { label: 'Topic shifts', value: transcript.filter(t => t.topic_shift).length },
-              { label: 'On-topic',     value: transcript.filter(t => t.topic_status === 'on_topic').length },
-              { label: 'Off-topic',    value: transcript.filter(t => t.topic_status === 'off_topic').length },
-            ].map(m => (
-              <div className="metric-row" key={m.label}>
-                <span style={{ fontSize: 12, color: '#666' }}>{m.label}</span>
-                <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--blue)' }}>{m.value}</span>
-              </div>
-            ))}
+            {liveMetrics ? (
+              [
+                { label: 'Speaking Rate', value: `${liveMetrics.speaking_rate_wpm} wpm`, color: '#4a7fe5' },
+                { label: 'Filler Rate',   value: `${liveMetrics.filler_rate_pct}%`,      color: '#f0a040' },
+                { label: 'Pauses',        value: `${liveMetrics.total_pauses}`,           color: '#e05555' },
+                { label: 'Topic Relevance', value: liveMetrics.topic_relevance != null ? liveMetrics.topic_relevance.toFixed(2) : '—', color: '#27ae60' },
+                { label: 'Coherence',     value: liveMetrics.avg_coherence != null ? liveMetrics.avg_coherence.toFixed(2) : '—', color: '#6c63ff' },
+                { label: 'Words spoken',  value: liveMetrics.total_words,                color: '#888' },
+              ].map(m => (
+                <div className="metric-row" key={m.label}>
+                  <span style={{ fontSize: 12, color: '#666' }}>{m.label}</span>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: m.color }}>{m.value}</span>
+                </div>
+              ))
+            ) : (
+              [
+                { label: 'Utterances',   value: transcript.length },
+                { label: 'Topic shifts', value: transcript.filter(t => t.topic_shift).length },
+                { label: 'On-topic',     value: transcript.filter(t => t.topic_status === 'on_topic').length },
+                { label: 'Off-topic',    value: transcript.filter(t => t.topic_status === 'off_topic').length },
+              ].map(m => (
+                <div className="metric-row" key={m.label}>
+                  <span style={{ fontSize: 12, color: '#666' }}>{m.label}</span>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--blue)' }}>{m.value}</span>
+                </div>
+              ))
+            )}
           </div>
 
           <div className="card">
