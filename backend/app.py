@@ -44,7 +44,7 @@ def get_whisper():
     if _whisper_model is None:
         import whisper
         logger.info("Loading Whisper model (base)…")
-        _whisper_model = whisper.load_model("base")
+        _whisper_model = whisper.load_model("small")   # better accuracy than base
         logger.info("Whisper ready.")
     return _whisper_model
 
@@ -80,8 +80,7 @@ def save_sessions(sessions):
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok",
-                    "model": "all-MiniLM-L6-v2 + Whisper base"}), 200
+    return jsonify({"status": "ok", "model": "all-MiniLM-L6-v2 + Whisper small"}), 200
 
 
 @app.route("/api/session/reset", methods=["POST"])
