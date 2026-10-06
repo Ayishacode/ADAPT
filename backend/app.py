@@ -154,16 +154,24 @@ def transcribe():
             audio_np = audio_np.mean(axis=1)
         duration_sec = len(audio_np) / sr
 
+        # ── Diagnostic: log audio stats to verify mic is capturing real sound ─
+        rms = float(np.sqrt(np.mean(audio_np ** 2)))
+        peak = float(np.max(np.abs(audio_np)))
+        logger.info("Audio stats | duration=%.2fs | RMS=%.5f | peak=%.5f | samples=%d",
+                    duration_sec, rms, peak, len(audio_np))
+        if rms < 0.001:
+            logger.warning("Audio RMS is very low (%.5f) — mic may not be capturing sound", rms)
+
         # ── Whisper with word timestamps ──────────────────────────────────────
         model  = get_whisper()
         output = model.transcribe(
             audio_np,
             language="en",
             fp16=False,
-            word_timestamps=True,          # ← needed for pause detection
-            no_speech_threshold=0.6,
-            logprob_threshold=-1.0,
-            compression_ratio_threshold=2.0,
+            word_timestamps=True,
+            no_speech_threshold=0.8,       # raised from 0.6 — less aggressive filtering
+            logprob_threshold=-2.0,        # loosened from -1.0
+            compression_ratio_threshold=2.4,  # loosened from 2.0
             condition_on_previous_text=False,
         )
         raw_text = output["text"].strip()
@@ -268,6 +276,42 @@ def get_latest_session():
     if not sessions:
         return jsonify({"error": "No sessions saved yet."}), 404
     return jsonify(sessions[-1]), 200
+
+
+@app.route("/api/debug/save-audio", methods=["POST"])
+def debug_save_audio():
+    """
+    Save the incoming audio as a wav file to debug/last_chunk.wav
+    so you can play it back and verify what Whisper is hearing.
+    """
+    if "audio" not in request.files:
+        return jsonify({"error": "No audio."}), 400
+    audio_file = request.files["audio"]
+    debug_dir = os.path.join(os.path.dirname(__file__), "debug")
+    os.makedirs(debug_dir, exist_ok=True)
+    webm_path = os.path.join(debug_dir, "last_chunk.webm")
+    wav_path  = os.path.join(debug_dir, "last_chunk.wav")
+    audio_file.save(webm_path)
+    try:
+        import imageio_ffmpeg, subprocess
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        subprocess.run([ffmpeg_exe, "-y", "-i", webm_path,
+                        "-ar", "16000", "-ac", "1", wav_path],
+                       capture_output=True, timeout=15)
+        import soundfile as sf
+        import numpy as np
+        audio_np, sr = sf.read(wav_path, dtype="float32")
+        rms  = float(np.sqrt(np.mean(audio_np ** 2)))
+        peak = float(np.max(np.abs(audio_np)))
+        return jsonify({
+            "saved_to": wav_path,
+            "duration_sec": round(len(audio_np) / sr, 2),
+            "rms": round(rms, 6),
+            "peak": round(peak, 6),
+            "message": "Play debug/last_chunk.wav to hear what Whisper receives",
+        }), 200
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 if __name__ == "__main__":
