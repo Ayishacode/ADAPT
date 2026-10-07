@@ -1,25 +1,16 @@
 """
 topic_detector.py
------------------
-Stage-1 Topic-Shift Detection Module for NeuroClarity.
 
-Algorithm
----------
-- Uses sentence-transformers (all-MiniLM-L6-v2) to generate sentence embeddings.
-- Maintains a rolling "topic context" from the N most recent ON-TOPIC utterances.
-- The topic representation is the mean of those context embeddings.
-- Cosine similarity between the new utterance and the topic mean is computed.
-- A configurable threshold (default 0.55) determines on-topic vs off-topic.
-- Consecutive-utterance confirmation:  a single below-threshold sentence does NOT
-  immediately trigger a shift.  Two consecutive off-topic scores confirm a shift.
-- After a confirmed shift the context is reset to the new utterance so subsequent
-  utterances are evaluated against the new topic.
-- Very short utterances (< MIN_WORDS words) are skipped — they carry insufficient
-  semantic content and would produce noisy similarity scores.
+NeuroClarity Stage-1 Topic Shift Detection
 
-This module is intentionally model-agnostic at the top level so that the SBERT
-detector can later be swapped for a DialSeg-trained classifier without touching
-the Flask API or the frontend.
+Method:
+    SBERT embeddings
+        ↓
+    cosine similarity
+        ↓
+    topic context
+        ↓
+    consecutive off-topic confirmation
 """
 
 import logging
@@ -28,181 +19,378 @@ from typing import Optional
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-# ── Configuration (all tunable for DialSeg_711 evaluation) ──────────────────
-SIMILARITY_THRESHOLD: float = 0.30   # cosine similarity boundary (tunable via DialSeg_711)
-CONTEXT_WINDOW:       int   = 5      # max on-topic utterances kept as context
-MIN_WORDS:            int   = 3      # utterances shorter than this are skipped
-CONFIRM_CONSECUTIVE:  int   = 2      # off-topic hits needed to confirm a shift
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+# Start with 0.42 — calibrated for MiniLM-L6-v2 on real conversational speech.
+# Real on-topic sentences typically score 0.35–0.65; off-topic drops below 0.30.
+# Tune using DialSeg_711 dataset in Stage 2.
+SIMILARITY_THRESHOLD = 0.42
+
+# Number of previous on-topic utterances used to represent the current topic.
+CONTEXT_WINDOW = 5
+
+# Allow utterances as short as 2 words to build context (important for real speech chunks).
+MIN_WORDS = 2
+
+# Confirm a shift after this many consecutive off-topic scores.
+# 1 = immediate detection (more sensitive), 2 = requires confirmation (less noise).
+CONFIRM_CONSECUTIVE = 1
+
+
+# ============================================================
+# LOGGING
+# ============================================================
+
 logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
 )
+
 logger = logging.getLogger(__name__)
 
 
-# ── Model (loaded once at import time) ───────────────────────────────────────
-logger.info("Loading sentence-transformer model: %s", MODEL_NAME)
-_model = SentenceTransformer(MODEL_NAME)
-logger.info("Model loaded.")
+# ============================================================
+# LOAD SBERT
+# ============================================================
+
+logger.info(
+    "Loading sentence-transformer model: %s",
+    MODEL_NAME
+)
+
+_model = SentenceTransformer(
+    MODEL_NAME
+)
+
+logger.info(
+    "Sentence-transformer model loaded."
+)
 
 
-# ── Session state (per conversation session) ─────────────────────────────────
+# ============================================================
+# TOPIC SESSION
+# ============================================================
+
 class TopicSession:
-    """
-    Holds the state of a single conversation session.
-    Create one instance per conversation; call reset() to start a new session.
-    """
 
-    def __init__(self) -> None:
+    def __init__(self):
+
         self.reset()
 
-    def reset(self) -> None:
-        """Reset for a brand-new conversation."""
-        self._context_embeddings: list[np.ndarray] = []
-        self._off_topic_streak:   int              = 0
-        self._utterance_count:    int              = 0
-        logger.debug("TopicSession reset.")
+    # --------------------------------------------------------
+    # RESET
+    # --------------------------------------------------------
 
-    # ── Internal helpers ──────────────────────────────────────────────────────
+    def reset(self):
 
-    def _embed(self, text: str) -> np.ndarray:
-        return _model.encode(text, convert_to_numpy=True, normalize_embeddings=True)
+        self._context_embeddings = []
 
-    def _topic_vector(self) -> Optional[np.ndarray]:
-        """Return the mean of all context embeddings (already L2-normalised)."""
+        self._off_topic_streak = 0
+
+        self._utterance_count = 0
+
+        logger.info(
+            "Topic session reset."
+        )
+
+    # --------------------------------------------------------
+    # EMBEDDING
+    # --------------------------------------------------------
+
+    def _embed(
+        self,
+        text: str
+    ) -> np.ndarray:
+
+        embedding = _model.encode(
+            text,
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        )
+
+        return embedding
+
+    # --------------------------------------------------------
+    # TOPIC VECTOR
+    # --------------------------------------------------------
+
+    def _topic_vector(
+        self
+    ) -> Optional[np.ndarray]:
+
         if not self._context_embeddings:
+
             return None
-        mean = np.mean(self._context_embeddings, axis=0)
-        norm = np.linalg.norm(mean)
-        return mean / norm if norm > 1e-9 else mean
 
-    def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
-        """Cosine similarity of two L2-normalised vectors == their dot product."""
-        return float(np.clip(np.dot(a, b), -1.0, 1.0))
+        mean = np.mean(
+            self._context_embeddings,
+            axis=0
+        )
 
-    def _add_to_context(self, embedding: np.ndarray) -> None:
-        """Add utterance to the rolling context window."""
-        self._context_embeddings.append(embedding)
-        if len(self._context_embeddings) > CONTEXT_WINDOW:
+        norm = np.linalg.norm(
+            mean
+        )
+
+        if norm > 1e-9:
+
+            mean = mean / norm
+
+        return mean
+
+    # --------------------------------------------------------
+    # COSINE SIMILARITY
+    # --------------------------------------------------------
+
+    def _cosine_similarity(
+        self,
+        a: np.ndarray,
+        b: np.ndarray
+    ) -> float:
+
+        score = np.dot(
+            a,
+            b
+        )
+
+        return float(
+            np.clip(
+                score,
+                -1.0,
+                1.0
+            )
+        )
+
+    # --------------------------------------------------------
+    # ADD TO CONTEXT
+    # --------------------------------------------------------
+
+    def _add_to_context(
+        self,
+        embedding: np.ndarray
+    ):
+
+        self._context_embeddings.append(
+            embedding
+        )
+
+        if len(
+            self._context_embeddings
+        ) > CONTEXT_WINDOW:
+
             self._context_embeddings.pop(0)
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    # --------------------------------------------------------
+    # ANALYZE
+    # --------------------------------------------------------
 
-    def analyze(self, utterance: str, threshold: float = SIMILARITY_THRESHOLD) -> dict:
-        """
-        Analyse a new utterance and return a topic-status result dict.
+    def analyze(
+        self,
+        utterance: str,
+        threshold: float = SIMILARITY_THRESHOLD
+    ) -> dict:
 
-        Parameters
-        ----------
-        utterance : str
-            The latest transcribed utterance from Whisper STT.
-        threshold : float
-            Cosine similarity threshold (overrides the module default).
-
-        Returns
-        -------
-        dict with keys:
-            topic_status    : "on_topic" | "off_topic" | "initializing" | "skipped"
-            similarity_score: float (0–1)  or None
-            topic_shift     : bool
-            utterance_count : int
-            message         : str (human-readable explanation)
-        """
         utterance = utterance.strip()
 
-        # ── Guard: empty input ────────────────────────────────────────────────
-        if not utterance:
-            return self._result("skipped", None, False, "Empty utterance received.")
+        # ----------------------------------------------------
+        # EMPTY
+        # ----------------------------------------------------
 
-        # ── Guard: too short ──────────────────────────────────────────────────
-        word_count = len(utterance.split())
-        if word_count < MIN_WORDS:
-            logger.debug(
-                "Utterance too short (%d words), skipped: %r", word_count, utterance
-            )
+        if not utterance:
+
             return self._result(
-                "skipped", None, False,
-                f"Utterance too short ({word_count} words); skipped to avoid noise.",
+                "skipped",
+                None,
+                False,
+                "Empty utterance received."
+            )
+
+        # ----------------------------------------------------
+        # SHORT
+        # ----------------------------------------------------
+
+        word_count = len(
+            utterance.split()
+        )
+
+        if word_count < MIN_WORDS:
+
+            return self._result(
+                "skipped",
+                None,
+                False,
+                f"Utterance too short ({word_count} words)."
             )
 
         self._utterance_count += 1
-        emb = self._embed(utterance)
 
-        # ── First utterance: initialise the topic ────────────────────────────
-        if not self._context_embeddings:
-            self._add_to_context(emb)
-            logger.debug(
-                "Utterance %d (init): %r  ->  topic initialised.",
-                self._utterance_count, utterance,
-            )
-            return self._result(
-                "initializing", 1.0, False,
-                "First utterance — topic context initialised.",
-            )
+        # ----------------------------------------------------
+        # EMBEDDING
+        # ----------------------------------------------------
 
-        # ── Compute similarity ────────────────────────────────────────────────
-        topic_vec = self._topic_vector()
-        score     = self._cosine_similarity(emb, topic_vec)
-
-        is_off_topic = score < threshold
-
-        if is_off_topic:
-            self._off_topic_streak += 1
-        else:
-            self._off_topic_streak = 0
-
-        # ── Consecutive-utterance confirmation ────────────────────────────────
-        confirmed_shift = self._off_topic_streak >= CONFIRM_CONSECUTIVE
-
-        logger.debug(
-            "Utterance: %r | Similarity: %.4f | Threshold: %.2f | "
-            "Status: %s | Topic Shift: %s",
-            utterance, score, threshold,
-            "OFF_TOPIC" if is_off_topic else "ON_TOPIC",
-            confirmed_shift,
+        embedding = self._embed(
+            utterance
         )
 
-        if confirmed_shift:
-            # Reset context to the new topic
-            self._context_embeddings = [emb]
-            self._off_topic_streak   = 0
-            status = "off_topic"
-            msg    = (
-                f"Topic shift confirmed after {CONFIRM_CONSECUTIVE} consecutive "
-                f"off-topic utterances. Context reset to new topic."
+        # ----------------------------------------------------
+        # FIRST UTTERANCE
+        # ----------------------------------------------------
+
+        if not self._context_embeddings:
+
+            self._add_to_context(
+                embedding
             )
-        elif is_off_topic:
-            # First off-topic hit — warn but do not shift yet
-            status = "off_topic"
-            msg    = (
-                f"Possible topic drift (score {score:.2f} < {threshold}). "
-                f"Monitoring for confirmation."
+
+            logger.info(
+                "Topic context initialized with: %r",
+                utterance[:60]
             )
+
+            return self._result(
+                "on_topic",       # show green on first utterance
+                1.0,
+                False,
+                "Topic context initialized."
+            )
+
+        # ----------------------------------------------------
+        # CURRENT TOPIC
+        # ----------------------------------------------------
+
+        topic_vector = self._topic_vector()
+
+        score = self._cosine_similarity(
+            embedding,
+            topic_vector
+        )
+
+        # Log every score so we can see what's happening
+        logger.info(
+            "Topic score | utterance=%r | score=%.4f | threshold=%.2f | %s",
+            utterance[:60],
+            score,
+            threshold,
+            "OFF_TOPIC" if score < threshold else "ON_TOPIC"
+        )
+
+        # ----------------------------------------------------
+        # TOPIC DECISION
+        # ----------------------------------------------------
+
+        is_off_topic = (
+            score < threshold
+        )
+
+        # ----------------------------------------------------
+        # UPDATE STREAK
+        # ----------------------------------------------------
+
+        if is_off_topic:
+
+            self._off_topic_streak += 1
+
         else:
-            # On topic — add to context window
-            self._add_to_context(emb)
-            status = "on_topic"
-            msg    = f"On topic (score {score:.2f} >= {threshold})."
 
-        return self._result(status, round(score, 4), confirmed_shift, msg)
+            self._off_topic_streak = 0
 
-    # ── Helper ────────────────────────────────────────────────────────────────
+        # ----------------------------------------------------
+        # CONFIRMED SHIFT
+        # ----------------------------------------------------
+
+        confirmed_shift = (
+            self._off_topic_streak
+            >= CONFIRM_CONSECUTIVE
+        )
+
+        # ----------------------------------------------------
+        # CONFIRMED SHIFT
+        # ----------------------------------------------------
+
+        if confirmed_shift:
+
+            # New topic becomes the context.
+            self._context_embeddings = [
+                embedding
+            ]
+
+            self._off_topic_streak = 0
+
+            return self._result(
+                "off_topic",
+                round(score, 4),
+                True,
+                (
+                    "Topic shift confirmed after "
+                    f"{CONFIRM_CONSECUTIVE} consecutive "
+                    "off-topic utterances."
+                )
+            )
+
+        # ----------------------------------------------------
+        # POSSIBLE OFF TOPIC
+        # ----------------------------------------------------
+
+        if is_off_topic:
+
+            return self._result(
+                "off_topic",
+                round(score, 4),
+                False,
+                (
+                    "Possible topic drift detected. "
+                    "Waiting for confirmation."
+                )
+            )
+
+        # ----------------------------------------------------
+        # ON TOPIC
+        # ----------------------------------------------------
+
+        self._add_to_context(
+            embedding
+        )
+
+        return self._result(
+            "on_topic",
+            round(score, 4),
+            False,
+            (
+                f"On topic "
+                f"(similarity={score:.2f})."
+            )
+        )
+
+    # --------------------------------------------------------
+    # RESULT
+    # --------------------------------------------------------
 
     def _result(
         self,
-        topic_status:    str,
+        topic_status: str,
         similarity_score: Optional[float],
-        topic_shift:     bool,
-        message:         str,
+        topic_shift: bool,
+        message: str
     ) -> dict:
+
         return {
-            "topic_status":     topic_status,
-            "similarity_score": similarity_score,
-            "topic_shift":      topic_shift,
-            "utterance_count":  self._utterance_count,
-            "message":          message,
+
+            "topic_status":
+                topic_status,
+
+            "similarity_score":
+                similarity_score,
+
+            "topic_shift":
+                topic_shift,
+
+            "utterance_count":
+                self._utterance_count,
+
+            "message":
+                message
         }
