@@ -26,20 +26,19 @@ from sentence_transformers import SentenceTransformer
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 
-# Start with 0.42 — calibrated for MiniLM-L6-v2 on real conversational speech.
-# Real on-topic sentences typically score 0.35–0.65; off-topic drops below 0.30.
-# Tune using DialSeg_711 dataset in Stage 2.
-SIMILARITY_THRESHOLD = 0.42
+# Threshold calibrated for MiniLM-L6-v2 on real conversational speech.
+# On-topic sentences typically score 0.35–0.65; off-topic drops below 0.20.
+SIMILARITY_THRESHOLD = 0.38
 
 # Number of previous on-topic utterances used to represent the current topic.
 CONTEXT_WINDOW = 5
 
-# Allow utterances as short as 2 words to build context (important for real speech chunks).
+# Allow utterances as short as 2 words to build context.
 MIN_WORDS = 2
 
-# Confirm a shift after this many consecutive off-topic scores.
-# 1 = immediate detection (more sensitive), 2 = requires confirmation (less noise).
-CONFIRM_CONSECUTIVE = 1
+# Require 2 consecutive off-topic scores before confirming a shift.
+# This prevents single borderline sentences from resetting the context.
+CONFIRM_CONSECUTIVE = 2
 
 
 # ============================================================
